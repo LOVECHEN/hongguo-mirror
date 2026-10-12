@@ -103,6 +103,7 @@ log "上游共 ${#tags[@]} 个 release"
 
 synced=0; updated=0; skipped=0
 for tag in ${tags[@]+"${tags[@]}"}; do
+  # 注意:gh release view 没有 isLatest 字段,别加(会报 Unknown JSON field 并中断)。
   meta="$(gh release view "$tag" --repo "$RELEASE_SRC" \
             --json name,body,isPrerelease,isDraft,assets)"
   [ "$(jq -r .isDraft <<<"$meta")" = "true" ] && { echo "  [$tag] draft,跳过"; continue; }
@@ -110,6 +111,9 @@ for tag in ${tags[@]+"${tags[@]}"}; do
   title="$(jq -r '.name // ""' <<<"$meta")"
   prerelease_flag=""
   [ "$(jq -r .isPrerelease <<<"$meta")" = "true" ] && prerelease_flag="--prerelease"
+  # 新建时一律不抢 Latest(gh 默认会把每个非预发布 release 设为 latest,导致"新→旧"
+  # 顺序镜像时最旧版本抢走 Latest)。真正的 Latest 在循环结束后按上游 API 统一校正。
+  latest_flag="--latest=false"
   up_assets=()
   while IFS= read -r a; do [ -n "$a" ] && up_assets+=("$a"); done < <(
     jq -r '.assets[].name' <<<"$meta")
@@ -154,13 +158,20 @@ for tag in ${tags[@]+"${tags[@]}"}; do
     # shellcheck disable=SC2086
     gh release create "$tag" --repo "$MIRROR_REPO" \
       --title "${title:-$tag}" --notes-file "$notes_file" \
-      $prerelease_flag "$dldir"/*
+      $prerelease_flag $latest_flag "$dldir"/*
     synced=$((synced+1))
   fi
   rm -rf "$dldir"
 done
 
 log "Release 完成: 新建 $synced / 补齐 $updated / 跳过 $skipped (共 ${#tags[@]})"
+
+# 校正 Latest:让本仓的 Latest 与上游一致(自愈,幂等)
+up_latest="$(gh api "repos/$RELEASE_SRC/releases/latest" --jq .tag_name 2>/dev/null || true)"
+if [ -n "${up_latest:-}" ] && gh release view "$up_latest" --repo "$MIRROR_REPO" >/dev/null 2>&1; then
+  gh release edit "$up_latest" --repo "$MIRROR_REPO" --latest >/dev/null
+  log "已将 $up_latest 校正为 Latest"
+fi
 
 # ===========================================================================
 # 3. keepalive 心跳(自持)
