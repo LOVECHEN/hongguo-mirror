@@ -1,0 +1,75 @@
+name: 安装或播放问题
+description: 告诉我们卡在哪一步，帮助复现和修复。
+title: "[问题] "
+body:
+  - type: markdown
+    attributes:
+      value: "请先查看 README 已知问题。不要上传账号密码、令牌或私人观看记录，截图请遮住无关信息。"
+  - type: dropdown
+    id: system
+    attributes:
+      label: 操作系统
+      options:
+        - Windows 11 x64
+        - Windows 10 x64
+        - 不确定或其他（请在说明中补充）
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 软件版本
+      description: 如果还没装好或无法启动，可以留空；已安装时可在应用设置中查看。
+      placeholder: 例如 1.0.4
+    validations:
+      required: false
+  - type: textarea
+    id: steps
+    attributes:
+      label: 如何出现这个问题
+      description: 写出操作步骤、预期结果、实际结果和错误提示。若详情页的播放按钮不可点击，请写下提示原文，以及“设置”→“播放服务”点“检查连接”后的状态；若已进入播放器，再说明持续加载、黑屏、有声无画或报错，以及换一部剧是否相同；若提示“播放中断”，还请说明是点击后立即还是播放一段后出现、重试一次能否恢复。若比较不同网络，请说明是同一台电脑切换网络还是两台电脑，软件版本是否相同；不必提供 IP 或观看历史。
+      placeholder: 例如：详情页提示桌面内容服务尚未就绪；设置中的播放服务为未连接，点检查连接后仍未连接。
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: 当前使用情况
+      description: 请选择本次故障实际发生的步骤；如果已经看到视频画面，请选择播放相关项。
+      options:
+        - 下载链接打不开或文件未下载完成
+        - 已下载，但安装程序未完成安装
+        - 已安装，但应用无法启动
+        - 能打开首页或详情，但播放按钮不可点击
+        - 能打开首页或详情，尚未尝试播放
+        - 已点击播放，但尚未看到视频画面
+        - 已播放视频，但中途出现“播放中断”
+        - 能够播放，但部分操作有问题
+        - 不确定或其他
+    validations:
+      required: true
+  - type: dropdown
+    id: service_status
+    attributes:
+      label: 播放服务状态（选填）
+      description: 如果方便，可在“设置”→“播放服务”点一次“检查连接”后选择。软件无法打开或尚未检查可跳过；服务已连接也不代表视频一定能播放。
+      options:
+        - 已连接
+        - 未连接，或提示内置服务已退出
+        - 尚未检查或无法打开软件
+        - 不确定
+    validations:
+      required: false
+  - type: input
+    id: installer_source
+    attributes:
+      label: 安装包实际下载来源（选填）
+      description: 请填写这台电脑使用的安装包来自 GitHub 发行页、网盘还是其他来源；这与在哪里看到介绍不同。不确定可留空，请勿填写分享口令或账号信息。
+      placeholder: 例如 GitHub v1.0.4 发行页、网盘
+    validations:
+      required: false
+  - type: input
+    id: source
+    attributes:
+      label: 在哪里看到的软件（选填）
+      placeholder: 例如知乎、B站、小众软件、GitHub、朋友推荐；也可以不填
