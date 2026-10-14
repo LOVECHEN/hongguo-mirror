@@ -10,19 +10,19 @@ Windows 10 / 11 **x64（64 位）** · 安装包 **108.6 MiB**。普通使用只
 
 ## 电视、盒子、投影与平板
 
-**0.5.4 修复播放准备失败：更新单集播放资源接口，已在小米 Android 13 平板验证续播、切集和 AI 剧首播。** 保留遥控焦点、顶部分类、临时倍速和在线更新提醒；0.5.2/0.5.3 可在应用内检查更新。
+**0.5.5 恢复真人首页、题材分类和快速换剧片单，并沿用0.5.4的播放资源修复。** 保留遥控焦点、临时倍速和在线更新提醒；0.5.2～0.5.4可在应用内检查更新。
 
-**已知问题（2026-10-13）：真人剧首页目录接口返回错误码 6000，片单暂不可用；本版修复播放资源获取，不代表目录问题已解决。AI 分类和已有历史入口已验证可播放。**
+**0.5.5 已恢复真人剧首页与题材片单，漫剧和 AI 剧分类保持独立。关键词搜索仍可能受原服务影响；搜索不可用时请从首页或题材分类选剧。ARM32 系统暂不支持。**
 
 [查看电视版实机图文、安装步骤与常见问题](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/blob/main/TV.md)
 
-**[下载 Android TV 测试版 0.5.4](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/tag/tv-v0.5.4)** · APK **4.08 MB** · **Android 5.0+ / ARM64 系统**。32 位 Android 不适用；实际旧电视兼容性待测试。
+**[下载 Android TV 测试版 0.5.5](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/tag/tv-v0.5.5)** · APK **4.08 MB** · **Android 5.0+ / ARM64 系统**。32 位 Android 不适用；实际旧电视兼容性待测试。
 
 由渠道有数独立维护，独立播放无需电脑。支持暗色界面、遥控导航、搜索收藏、续播和快速“换一部”；充分观看优先同题材，第一集主动换剧尝试其他题材，并优先近期候选。设置可关闭或重置本机偏好。电脑与电视分别安装，历史暂不互通。
 
 应用内“设置 → 关于与帮助”提供原版入口、反馈和安装签名核验。APK 摘要及证书摘要随电视版发行说明公布，欢迎转载介绍并保留署名与原链接。小米 Android 13 平板已验收；真实电视、旧固件及实体遥控仍待测试。
 
-**[直接下载电视版 APK](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/download/tv-v0.5.4/HongguoTV-0.5.4-arm64.apk)**　｜　[电视安装说明](https://channel-ai-practice-wj.waligoraamodio288.chatgpt.site/help/install/#android-tv)　｜　[反馈电视版使用情况](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/issues/new?template=android-tv.yml)
+**[直接下载电视版 APK](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/download/tv-v0.5.5/HongguoTV-0.5.5-arm64.apk)**　｜　[电视安装说明](https://channel-ai-practice-wj.waligoraamodio288.chatgpt.site/help/install/#android-tv)　｜　[反馈电视版使用情况](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/issues/new?template=android-tv.yml)
 
 反馈表可填写安装成功或失败、设备型号、系统版本和遥控/播放情况；不确定的项目可以选择“未测试”。以下安装与升级说明适用于 Windows 桌面版。
 
@@ -57,6 +57,12 @@ Windows 10 / 11 **x64（64 位）** · 安装包 **108.6 MiB**。普通使用只
 ## 播放中断时
 
 若播放器提示“播放中断，请重试当前集”，先点“重试”一次，再换另一部剧对照；随后到“设置”→“播放服务”点“检查连接”。[提交播放问题](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/issues/new?template=bug-report.yml)时请写明是否已安装并打开应用、点击播放后立即还是播了一段时间才中断、连接状态，以及重试和换剧的结果。无需提供账号、令牌或完整日志。这个提示可能对应多种失败，目前不能仅凭提示判断原因。
+
+## 旧版无法播放，先检查哪个版本？
+
+Windows 用户可先在设置里核对版本。1.0.13 已修复一类视频加载失败，并提供黑暗模式；请通过[固定最新版入口](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/latest)获取当前安装包。这个修复不代表所有网络、设备或剧集都能正常播放。更新后仍失败，请按上面的“播放中断时”步骤反馈版本、屏幕提示和换剧结果。
+
+电视、盒子和平板请使用上方 Android TV 入口；真人剧、漫剧和 AI剧（AI 剧）分类独立，ARM32 系统暂不支持。Windows 安装程序不能安装到电视。
 
 ## 当前已知反馈
 
@@ -121,4 +127,3 @@ e0ce83c3a5373ea861787ab0f5a4be99c52aff7a8aefa50a350ed5b5b75f06be
 由渠道有数独立维护。相关品牌与内容归各自权利方所有，内容和播放可用性受来源及网络情况影响。
 
 请核对原发行仓库账号为 `waligoraamodio288-rgb/hongguo-desktop-releases`。欢迎转载介绍并保留渠道有数署名与原版链接；第三方介绍或镜像请标明身份，避免读者误认开发和维护方。软件名称、截图或版权文字本身不能证明镜像文件未被修改，请对照原发行页同版本摘要。
-
