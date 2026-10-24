@@ -40,21 +40,17 @@ Mac 上也可以搜索找剧、收藏和接着本机进度看，提供 Command �
 
 ## 电视、盒子、投影与平板
 
-**0.5.8 测试版 · ARM32 / ARM64 · Android5.0+**
+**0.5.9 测试版 · ARM32 / ARM64 · Android5.0+**
 
-**[下载32位 ARMv7 · 1.26 MB](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/download/tv-v0.5.8/HongguoTV-0.5.8-arm32.apk)**　｜　**[下载64位 ARM64 · 4.09 MB](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/download/tv-v0.5.8/HongguoTV-0.5.8-arm64.apk)**　｜　[发行说明与校验](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/tag/tv-v0.5.8)
+**[下载32位 ARMv7 · 1.27 MB](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/download/tv-v0.5.9/HongguoTV-0.5.9-arm32.apk)** ｜ **[下载64位 ARM64 · 4.11 MB](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/download/tv-v0.5.9/HongguoTV-0.5.9-arm64.apk)**
 
-0.5.8 更新主取源，修复公开备用页面只开放前三集时后续集数无法播放的问题。两部剧第4、5集已在小米Android13平板的真实ARM32/ARM64进程播放；实测1280×720和1920×1080，第三集自然续播第四集及手动切第五集通过。样本通过不代表所有剧集或旧电视均适用。
+0.5.9 更新主取源并正式接入真人剧、漫剧关键词搜索。两部反馈样本的第4、5、10集在小米Android13平板真实ARM32/ARM64进程持续播放超过30秒，跨过10秒失败位置；实际720p和1080p，第三集续播第四集通过。仅代表本轮样本与设备，不保证全部剧集或旧电视。
 
-自动模式优先720p以内的可播轨道，仅在缺少兼容低档且设备支持硬解时选择不超过16MiB的1080p；低内存自动模式仍最高480p。手动480p/720p/1080p是上限，某集没有对应兼容轨道时仍可能失败，不自动软解或转码。支持硬解的设备可尝试自动或1080p。
+保持单播放器、单媒体工作线程、两槽缓存、单文件32MiB上限及64KiB分块下载；低内存自动最高480p，内存紧张时取消预取并释放封面。没有新增软件解码器或转码服务。若某集只有高清轨道，手动限制720p或低内存480p可能无法播放；性能充足且硬解支持的设备可尝试自动或1080p。
 
-三类首页、实际32位可见播放与遥控操作已在Android13小米平板核验，64位实际播放回归通过；旧电视固件、实体遥控仍需逐机测试。独立播放无需电脑，支持暗色界面、收藏续播、选集和“换一部”。关键词搜索仍可能受上游影响。
-
-已有同签名版本可同架构覆盖升级，保留本机记录；设置中支持检查更新。系统支持armeabi-v7a选32位，arm64-v8a可选64位，芯片宣传位数不能代替系统ABI。
+首次搜索需同意本机设备登记，AI搜索仅筛选热门片单。
 
 [电视版安装与实测范围](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/blob/main/TV.md) · [反馈设备体验](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/issues/new?template=android-tv.yml)
-
-以下安装与升级说明适用于Windows桌面版。
 
 ## 软件界面
 
