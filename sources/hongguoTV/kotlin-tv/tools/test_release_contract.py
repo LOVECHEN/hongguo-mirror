@@ -21,7 +21,7 @@ class ReleaseContractTest(unittest.TestCase):
 
     def test_current_source_version(self):
         build = (ROOT / 'kotlin-tv/app/build.gradle.kts').read_text()
-        self.assertEqual(('0.10.1', 11, 21), r.source_version(build, 'kotlin-v0.10.1'))
+        self.assertEqual(('0.11.1', 13, 21), r.source_version(build, 'kotlin-v0.11.1'))
 
     def test_source_version(self):
         self.assertEqual(('0.10.0', 10, 21), r.source_version(self.build, self.tag))
@@ -93,6 +93,24 @@ class ReleaseContractTest(unittest.TestCase):
             self.assertIn('secrets.HONGGUOTV_' + name, workflow)
         self.assertFalse((ROOT / '.github/workflows/kotlin-public-sync.yml').exists())
 
+    def test_latest_preview_version_is_compared_without_loosening_release_tags(self):
+        self.assertEqual((0, 10, 1), r.released_native_version('preview-v0.10.1-20261111'))
+        with self.assertRaises(ValueError):
+            r.version_tuple('preview-v0.10.1-20261111')
+        with self.assertRaises(ValueError):
+            r.released_native_version('unknown-v99')
+
+    def test_local_publish_requires_both_main_and_tag_to_match(self):
+        head = 'a' * 40
+        for tag_head in [head, 'b' * 40]:
+            refs = f'{head}\trefs/heads/main\n{tag_head}\trefs/tags/{self.tag}'
+            with patch.dict(r.os.environ, {}, clear=True), patch.object(r, 'run', side_effect=[f'https://github.com/{r.REPOSITORY}.git', '', head, refs]):
+                if tag_head == head:
+                    r.validate_local_publish(self.tag)
+                else:
+                    with self.assertRaises(ValueError):
+                        r.validate_local_publish(self.tag)
+
     def test_publish_forbidden_from_fork_or_branch(self):
         for env in [dict(GITHUB_REPOSITORY='fork/hongguoTV', GITHUB_REF='refs/tags/' + self.tag), dict(GITHUB_REPOSITORY=r.REPOSITORY, GITHUB_REF='refs/heads/main')]:
             with patch.dict(r.os.environ, env), self.assertRaises(ValueError):
@@ -124,9 +142,21 @@ class ReleaseContractTest(unittest.TestCase):
             r.publish(self.tag)
         self.assertEqual(2, run.call_count)
 
+    def test_draft_readback_uses_paginated_authenticated_listing(self):
+        draft = dict(id=7, tag_name=self.tag, draft=True, assets=[])
+        page = [dict(tag_name=f'other-{i}') for i in range(100)]
+        with patch.object(r, 'api', side_effect=[page, [draft]]) as api:
+            self.assertEqual(draft, r.release_including_draft(self.tag))
+            self.assertEqual(['releases?per_page=100&page=1', 'releases?per_page=100&page=2'],
+                             [call.args[0] for call in api.call_args_list])
+
+    def test_missing_draft_fails_closed(self):
+        with patch.object(r, 'api', return_value=[]), self.assertRaises(ValueError):
+            r.release_including_draft(self.tag)
+
     def test_draft_recovery_validates_before_publishing(self):
         release = dict(tag_name=self.tag, draft=True, target_commitish='a' * 40, assets=[])
-        with patch.dict(r.os.environ, GITHUB_REPOSITORY=r.REPOSITORY, GITHUB_REF='refs/tags/' + self.tag), patch.object(r, 'prepare', return_value=(self.manifest(), [])), patch.object(r, 'run', side_effect=[json.dumps([[release]]), '', '']) as run, patch.object(r, 'api', side_effect=[dict(draft=True, assets=[]), dict(draft=False, assets=[]), dict(tag_name=self.tag)]), patch.object(r, 'verify_assets') as verify:
+        with patch.dict(r.os.environ, GITHUB_REPOSITORY=r.REPOSITORY, GITHUB_REF='refs/tags/' + self.tag), patch.object(r, 'prepare', return_value=(self.manifest(), [])), patch.object(r, 'run', side_effect=[json.dumps([[release]]), '', '']) as run, patch.object(r, 'api', side_effect=[[dict(tag_name=self.tag, draft=True, assets=[])], dict(draft=False, assets=[]), dict(tag_name=self.tag)]), patch.object(r, 'verify_assets') as verify:
             r.publish(self.tag)
             self.assertEqual(2, verify.call_count)
             self.assertIn('upload', run.call_args_list[1].args)
@@ -134,7 +164,7 @@ class ReleaseContractTest(unittest.TestCase):
 
     def test_failed_uploaded_hash_never_publishes(self):
         release = dict(tag_name=self.tag, draft=True, target_commitish='a' * 40, assets=[])
-        with patch.dict(r.os.environ, GITHUB_REPOSITORY=r.REPOSITORY, GITHUB_REF='refs/tags/' + self.tag), patch.object(r, 'prepare', return_value=(self.manifest(), [])), patch.object(r, 'run', side_effect=[json.dumps([[release]]), '']) as run, patch.object(r, 'api', return_value=dict(draft=True, assets=[])), patch.object(r, 'verify_assets', side_effect=ValueError('digest mismatch')), self.assertRaises(ValueError):
+        with patch.dict(r.os.environ, GITHUB_REPOSITORY=r.REPOSITORY, GITHUB_REF='refs/tags/' + self.tag), patch.object(r, 'prepare', return_value=(self.manifest(), [])), patch.object(r, 'run', side_effect=[json.dumps([[release]]), '']) as run, patch.object(r, 'api', return_value=[dict(tag_name=self.tag, draft=True, assets=[])]), patch.object(r, 'verify_assets', side_effect=ValueError('digest mismatch')), self.assertRaises(ValueError):
             r.publish(self.tag)
         self.assertEqual(2, run.call_count)
 

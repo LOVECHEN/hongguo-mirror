@@ -327,6 +327,8 @@ class MainActivity : Activity() {
     private var currentRendition: Rendition? = null
     private var currentTiers: List<Rendition> = emptyList()
     private var autoDowngrades = 0
+    private val stallGuard = PlaybackStallGuard()
+    private var lastPlaybackDiagnosticAt = 0L
     private val tick =
         object : Runnable {
             override fun run() {
@@ -339,11 +341,34 @@ class MainActivity : Activity() {
                     maybePrepareSeason()
                     updateSeasonBanner()
                     val now = android.os.SystemClock.elapsedRealtime()
+                    if (android.util.Log.isLoggable("HGPlayback", android.util.Log.DEBUG) && now - lastPlaybackDiagnosticAt >= 5000) {
+                        player?.let { p ->
+                            android.util.Log.d("HGPlayback", "state=${p.playbackState} playing=${p.isPlaying} suppressed=${p.playbackSuppressionReason} position=${p.currentPosition} buffered=${p.totalBufferedDuration} audio=${p.audioDecoderCounters?.renderedOutputBufferCount} audioQueued=${p.audioDecoderCounters?.queuedInputBufferCount} audioMime=${p.audioFormat?.sampleMimeType} audioRate=${p.audioFormat?.sampleRate} audioChannels=${p.audioFormat?.channelCount} video=${p.videoDecoderCounters?.renderedOutputBufferCount}")
+                        }
+                        lastPlaybackDiagnosticAt = now
+                    }
+                    player?.let { p ->
+                        val frames = p.videoDecoderCounters?.renderedOutputBufferCount
+                        if (stallGuard.offer(
+                            episodeId = detail?.episodes?.getOrNull(episodeIndex).orEmpty(),
+                            now = now,
+                            frames = frames,
+                            eligible = playbackReady && !waitingForFirstFrame && !playError &&
+                                pendingSeek == null && p.isPlaying && root.hasWindowFocus() &&
+                                p.playbackState == Player.STATE_READY && p.totalBufferedDuration >= 5000,
+                        )) {
+                            playerFailure(PlaybackException(
+                                "视频解码停滞，正在尝试兼容恢复", null,
+                                PlaybackException.ERROR_CODE_DECODING_FAILED,
+                            ))
+                        }
+                    }
                     if (player?.isPlaying == true && now - lastSaved > 5000) {
                         saveProgress()
                         lastSaved = now
                     }
                 }
+                if (screen != "player") stallGuard.suspendObservation()
                 main.postDelayed(this, 1000)
             }
         }
@@ -427,6 +452,9 @@ class MainActivity : Activity() {
     // 启动入口：创建根容器，初始化账户、更新和媒体控制，再异步读取本机记录。
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
+        ContentRepository.deviceStore = PreferencesPlayerDeviceStore(
+            getSharedPreferences("native-player-device", MODE_PRIVATE)
+        )
         window.decorView.systemUiVisibility =
             View.SYSTEM_UI_FLAG_FULLSCREEN or
                 View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
@@ -3648,9 +3676,7 @@ class MainActivity : Activity() {
                         .setTargetBufferBytes(12 * 1024 * 1024)
                         .build()
                 val renderers =
-                    androidx.media3.exoplayer
-                        .DefaultRenderersFactory(this)
-                        .setEnableDecoderFallback(true)
+                    playbackRenderers(this)
                 ExoPlayer.Builder(this, renderers).setLoadControl(load).build().also {
                     player = it
                     playerView?.player = it
@@ -4932,6 +4958,7 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        stallGuard.suspendObservation()
         cancelNextSeason()
         searchSuggestions?.cancel()
         social.foreground(false)
