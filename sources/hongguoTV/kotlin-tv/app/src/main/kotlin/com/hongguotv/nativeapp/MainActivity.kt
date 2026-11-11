@@ -29,6 +29,7 @@ import androidx.media3.ui.PlayerView
 import com.hongguotv.core.*
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import kotlin.math.roundToInt
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class MainActivity : Activity() {
@@ -84,6 +85,35 @@ class MainActivity : Activity() {
     private var prefetchedFor = ""
     private var readySince = 0L
     private lateinit var artwork: ArtworkLoader
+    private var gradualPreloader: GradualPreloader? = null
+
+    private fun startGradualPreloading() {
+        if (gradualPreloader != null) return
+        val warmer = GradualPreloader(allowed = {
+            foreground && library.isLoaded && workJob?.isDone != false &&
+                screen == "catalog" && !rankBrowser.isRefreshing(rankBrowser.board) &&
+                (homeFeed?.canWarmCatalog() ?: true)
+        })
+        gradualPreloader = warmer
+        fun extra(rows: List<Series>) {
+            main.post {
+                rows.take(6).forEach { item -> warmer.enqueue("cover:${item.id}") { artwork.warm(item.cover) } }
+                rows.take(2).forEach { item -> warmer.enqueue("detail:${item.id}") { repository.warmDetail(item.id) } }
+            }
+        }
+        warmer.enqueue("rank:ALL:1") { extra(repository.warmRankPage(RankBoard.ALL, 1).items) }
+        warmer.enqueue("discovery") { extra(repository.warmDiscovery().items) }
+        for (page in 2..5) warmer.enqueue("rank:ALL:$page") { repository.warmRankPage(RankBoard.ALL, page) }
+        RankBoard.entries.filter { it != RankBoard.ALL }.forEach { board ->
+            warmer.enqueue("rank:$board:1") { extra(repository.warmRankPage(board, 1).items) }
+        }
+        // One page per slot instead of fetching five pages and all covers in a startup burst.
+        for (page in 2..5) RankBoard.entries.filter { it != RankBoard.ALL }.forEach { board ->
+            warmer.enqueue("rank:$board:$page") { repository.warmRankPage(board, page) }
+        }
+        warmer.resume()
+    }
+
 
     private data class DeferredUi(val apply: () -> Unit, val discard: () -> Unit = {})
 
@@ -105,6 +135,7 @@ class MainActivity : Activity() {
     private var workJob: java.util.concurrent.Future<*>? = null
     private var playerListener: Player.Listener? = null
     private lateinit var playbackTitle: TextView
+    private var homePlayback = false
     private var directPlayback = false
     private var collection: String? = null
     private var collectionReturn: CatalogState? = null
@@ -125,6 +156,7 @@ class MainActivity : Activity() {
     private var prefetchAttempts = 0
     private val homeFeedState = DramaFeedState()
     private var homeFeed: HomeFeedScreen? = null
+    private var catalogShell: CatalogShell? = null
     private var homeFeedIdentity = ""
     private var homeScreen: HomeScreen? = null
     private var selectionPreview: SeriesPreview? = null
@@ -137,9 +169,11 @@ class MainActivity : Activity() {
     private var searchDraft: String? = null
     private var searchSuggestions: SearchSuggestionsView? = null
     private var tvSearchPanel: TvSearchPanel? = null
+    private var submittedSearch: String? = null
     private var tvSearchOpen = false
     private val discoveryBrowser = DiscoveryBrowserState()
     private var discoveryScreen: DiscoveryScreen? = null
+    private var rankingScreen: RankingScreen? = null
     private lateinit var tvTools: TvTools
     private lateinit var updater: AppUpdater
 
@@ -153,6 +187,7 @@ class MainActivity : Activity() {
 
     private val detailTrail = java.util.ArrayDeque<DetailVisit>()
     private var relatedSection: RelatedWorksView? = null
+    private var producerDialog: ProducerWorksDialog? = null
     private var accountFavoriteButton: TextView? = null
     private var reservationOnline = true
     private val reservationFilters = mutableListOf<View>()
@@ -588,6 +623,7 @@ class MainActivity : Activity() {
 
     // 创建页面公共容器；清除旧视图后设置边距，可按需添加标题和返回按钮。
     private fun base(title: String? = null): LinearLayout {
+        catalogShell = null
         root.removeAllViews()
         root.background = TvVisual.backdrop(this)
         val container = column()
@@ -643,6 +679,8 @@ class MainActivity : Activity() {
     }
 
     private fun releaseCatalogViews() {
+        producerDialog?.close()
+        producerDialog = null
         settingsAccountStatus = null
         settingsSidebar = emptyList()
         settingsRows = emptyList()
@@ -651,6 +689,8 @@ class MainActivity : Activity() {
         tvSearchPanel = null
         discoveryScreen?.close()
         discoveryScreen = null
+        rankingScreen?.close()
+        rankingScreen = null
         continuousCatalog?.let { view ->
             view.capture()?.let { continuousPositions[continuousKey] = it }
             view.close()
@@ -659,8 +699,9 @@ class MainActivity : Activity() {
         while (continuousPositions.size > 20) continuousPositions.remove(
             continuousPositions.keys.first()
         )
-        homeFeed?.close()
+        val closingFeed = homeFeed
         homeFeed = null
+        closingFeed?.close()
         relatedSection = null
         accountFavoriteButton = null
         homeScreen?.let { homePosition = it.capturePosition() }
@@ -736,6 +777,7 @@ class MainActivity : Activity() {
 
     // 导航按钮的点击入口：记录当前栏目状态，再切换到目标栏目。
     private fun switchTab(next: Int) {
+        val keepNavigationFocus = nav.any { it.hasFocus() }
         if (tab == 1) {
             saveDiscoveryDraft()
             continuousCatalog?.capture()?.let { catalogFocus = it.id }
@@ -750,7 +792,7 @@ class MainActivity : Activity() {
         hasMore = saved?.hasMore ?: false
         ranking = saved?.ranking
         catalogFocus = tabFocus[next].orEmpty()
-        showCatalog(load = (next <= 2 && catalog.isEmpty()))
+        showCatalog(load = (next <= 2 && catalog.isEmpty()), focusNav = keepNavigationFocus)
         refreshAccountSection()
     }
 
@@ -890,7 +932,7 @@ class MainActivity : Activity() {
                 }
         }
 
-    // 内容页总入口：构建顶部导航，再根据当前栏目挂载首页、搜索或其他列表。
+    // 内容页总入口：复用顶部导航，只替换当前栏目的内容。
     private fun showCatalog(
         load: Boolean = false,
         focusNav: Boolean = false,
@@ -916,39 +958,18 @@ class MainActivity : Activity() {
         invalidatePage()
         screen = "catalog"
         releaseCatalogViews()
-        val container = base()
+        val shell = catalogShell?.takeIf { it.parent === root } ?: CatalogShell(this, ::switchTab).also {
+            root.removeAllViews()
+            root.background = TvVisual.backdrop(this)
+            root.addView(it, FrameLayout.LayoutParams(-1, -1))
+            catalogShell = it
+        }
+        shell.clearBody()
+        shell.select(tab)
+        nav.addAll(shell.navigation)
+        val container = shell.body
         if (tab != 0 && foreground && library.isLoaded && !favoriteMonitor.running)
             main.post { if (foreground && screen == "catalog") favoriteMonitor.check() }
-        val top = row().apply { setPadding(0, 0, 0, dp(8)) }
-        val brand = row()
-        brand.addView(
-            ImageView(this).apply { setImageResource(com.hongguotv.nativeapp.R.drawable.app_icon) },
-            lp(dp(28), dp(28)).apply { rightMargin = dp(9) },
-        )
-        brand.addView(
-            text("红果 TV", if (widthDp() < 800) 17f else 22f).apply {
-                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            }
-        )
-        top.addView(brand, lp(dp(if (widthDp() < 800) 105 else 140), dp(44)))
-        listOf("首页", "找剧", "排行榜", "收藏", "观看历史", "账户预约", "设置").forEachIndexed { index, label ->
-            val item = addButton(top, label, index == tab) { switchTab(index) }
-            item.textSize = if (widthDp() < 1000) 13f else 15f
-            item.setPadding(dp(9), dp(10), dp(9), dp(10))
-            fun paint(focused: Boolean) {
-                item.background = TvVisual.tab(this, focused, index == tab)
-                item.setTextColor(if (index == tab) TvStyle.accent else if (focused) white else muted)
-                item.setTypeface(null, if (focused || index == tab) Typeface.BOLD else Typeface.NORMAL)
-            }
-            paint(false)
-            item.setOnFocusChangeListener { _, focused -> paint(focused) }
-            nav += item
-        }
-        container.addView(top)
-        container.addView(
-            View(this).apply { setBackgroundColor(TvStyle.outline) },
-            lp(-1, dp(1)).apply { bottomMargin = dp(6) },
-        )
         if (tab == 6) {
             val body = column()
             container.addView(body, lp(-1, 0).apply { weight = 1f })
@@ -969,16 +990,35 @@ class MainActivity : Activity() {
                     this,
                     homeFeedState,
                     nav.toList(),
-                    { openDetail(it, false) },
-                    ::accountFavoriteAction,
-                    cloudAccount::favoriteActionLabel,
+                    { openDetail(it, resume = true, fromHome = true) },
+                    { series, anchor ->
+                        if (cloudAccount.signedIn) accountFavoriteAction(series, anchor)
+                        else {
+                            library.toggle(series)
+                            homeFeed?.refreshAccountLabel()
+                            Toast.makeText(this, if (library.favorite(series.id)) "已加入本机收藏" else "已取消本机收藏", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    { id -> if (cloudAccount.signedIn) cloudAccount.favoriteActionLabel(id)
+                        else if (library.favorite(id)) "已收藏 · 本机" else "加入本机收藏" },
                     PublicFeedBackend(
                         library.maxQuality,
                         account = cloudAccount.recommendationCredentials(),
                         startupCache = cloudAccount.recommendationStartupCache(),
                     ),
-                    Media3TrialPlayback(this),
+                    Media3TrialPlayback(this, library.playbackSpeed, library.frameMode),
                     autoPreview = library.homeAutoplay,
+                    backgroundBusy = { gradualPreloader?.busy == true },
+                    loadCover = ::loadCover,
+                    related = ::showHomeRelated,
+                    autoNext = library.autoNext,
+                    restoreProgress = library::progress,
+                    saveProgress = { progress, count, force ->
+                        library.save(progress)
+                        cloudAccount.upload(CloudProgress(progress.series, progress.episodeId,
+                            progress.episodeIndex, progress.position, progress.duration, progress.updatedAt),
+                            count, force || progress.completed || !foreground)
+                    },
                 )
             homeFeed = feed
             container.addView(feed, lp(-1, 0).apply { weight = 1f })
@@ -1010,42 +1050,10 @@ class MainActivity : Activity() {
                         }
                     },
                 )
+            rankingScreen = ranks
             container.addView(ranks, lp(-1, 0).apply { weight = 1f })
             ranks.start(load, focusNav)
             return
-        }
-        if (tab == 0) {
-            val types = row().apply { setPadding(0, dp(8), 0, dp(6)) }
-            if (!inlineHomeFilters()) types.addView(text("片库", 12f, muted), lp(dp(42), -2))
-            ContentType.entries.forEach { type ->
-                typeButtons[type] =
-                    addButton(types, type.label, library.contentType == type) {
-                            switchContentType(type)
-                        }
-                        .apply {
-                            isSelected = library.contentType == type
-                            nextFocusUpId = nav[tab].id
-                        }
-            }
-            if (inlineHomeFilters()) {
-                top.addView(Space(this), lp(0, 1).apply { weight = 1f })
-                typeButtons.values.forEach { view ->
-                    (view as TextView).apply {
-                        textSize = 12f
-                        minHeight = dp(34)
-                        setPadding(dp(12), dp(7), dp(12), dp(7))
-                    }
-                }
-                types.setPadding(0, 0, 0, 0)
-                top.addView(types)
-            } else {
-                if (tab == 0)
-                    types.addView(
-                        text("长按确认 · 管理片单", 12f, muted).apply { setPadding(dp(14), 0, 0, 0) }
-                    )
-                container.addView(types)
-            }
-            nav.forEach { it.nextFocusDownId = typeButtons.getValue(library.contentType).id }
         }
         if (tab == 1) {
             if (tvSearchOpen || query.isNotBlank()) {
@@ -1185,7 +1193,7 @@ class MainActivity : Activity() {
                 )
             }
         } else if (tab > 2) {
-            val heading = row().apply { setPadding(0, dp(12), 0, dp(6)) }
+            val heading = row().apply { setPadding(0, dp(4), 0, dp(4)) }
             heading.addView(
                 text(
                         when (tab) {
@@ -1193,7 +1201,7 @@ class MainActivity : Activity() {
                             4 -> "观看历史"
                             else -> "账户预约"
                         },
-                        25f,
+                        22f,
                     )
                     .apply { setTypeface(null, Typeface.BOLD) },
                 lp(0, -2).apply { weight = 1f },
@@ -1247,7 +1255,7 @@ class MainActivity : Activity() {
             }
             container.addView(heading)
             if (tab == 3 || tab == 4) {
-                val sources = row().apply { setPadding(0, dp(4), 0, dp(8)) }
+                val sources = row().apply { setPadding(0, dp(2), 0, dp(4)) }
                 val account =
                     if (tab == 3) librarySources.accountFavorites else librarySources.accountHistory
                 listOf(false, true).forEach { remote ->
@@ -1270,10 +1278,6 @@ class MainActivity : Activity() {
                 sourceButtons[0].nextFocusRightId = sourceButtons[1].id
                 sourceButtons[1].nextFocusLeftId = sourceButtons[0].id
                 sourceButtons[1].nextFocusRightId = sourceButtons[1].id
-                container.addView(sources)
-                nav.forEach { it.nextFocusDownId = sourceButtons[if (account) 1 else 0].id }
-                favoriteCheck?.nextFocusDownId = sourceButtons[if (account) 1 else 0].id
-                historyManage?.nextFocusDownId = sourceButtons[if (account) 1 else 0].id
                 val note =
                     when {
                         isAccountFavorites() ->
@@ -1283,19 +1287,30 @@ class MainActivity : Activity() {
                         isLocalHistory() -> "只保存在这台电视，管理和清空不影响账户历史"
                         else -> "只保存在这台电视，不自动上传或合并到账户收藏"
                     }
-                container.addView(text(note, 13f, muted).apply { setPadding(0, 0, 0, dp(6)) })
+                val notes = column().apply { setPadding(dp(10), 0, 0, 0) }
+                notes.addView(
+                    text(note, 12f, muted).apply {
+                        maxLines = 2
+                        ellipsize = TextUtils.TruncateAt.END
+                    }
+                )
+                if (isLocalFavorites()) {
+                    favoriteStatus =
+                        text(favoriteMonitor.status, 12f, muted).apply {
+                            maxLines = 1
+                            ellipsize = TextUtils.TruncateAt.END
+                        }
+                    notes.addView(favoriteStatus)
+                }
+                sources.addView(notes, lp(0, -2).apply { weight = 1f })
+                container.addView(sources)
+                nav.forEach { it.nextFocusDownId = sourceButtons[if (account) 1 else 0].id }
+                favoriteCheck?.nextFocusDownId = sourceButtons[if (account) 1 else 0].id
+                historyManage?.nextFocusDownId = sourceButtons[if (account) 1 else 0].id
             }
             if (tab == 5) {
                 val state = cloudAccount.reservationState(reservationOnline)
-                container.addView(
-                    text(
-                            "${cloudAccount.accountLabel} · ${state.message}\n每类读取最近 20 部预约，以下数量为当前已加载数",
-                            13f,
-                            muted,
-                        )
-                        .apply { setPadding(0, 0, 0, dp(6)) }
-                )
-                val filters = row()
+                val filters = row().apply { setPadding(0, dp(2), 0, dp(4)) }
                 for (online in listOf(true, false)) {
                     val category = cloudAccount.reservationState(online)
                     val count = if (category.loaded) category.rows.size.toString() else "—"
@@ -1312,15 +1327,23 @@ class MainActivity : Activity() {
                             }
                             .apply { nextFocusUpId = historyManage!!.id }
                 }
+                filters.addView(
+                    text(
+                            "${cloudAccount.accountLabel} · ${state.message}\n每类读取最近 20 部预约，以下数量为当前已加载数",
+                            12f,
+                            muted,
+                        )
+                        .apply {
+                            maxLines = 2
+                            ellipsize = TextUtils.TruncateAt.END
+                            setPadding(dp(10), 0, 0, 0)
+                        },
+                    lp(0, -2).apply { weight = 1f },
+                )
                 container.addView(filters)
                 historyManage?.nextFocusDownId =
                     reservationFilters[if (reservationOnline) 0 else 1].id
                 nav.forEach { it.nextFocusDownId = historyManage!!.id }
-            }
-            if (isLocalFavorites()) {
-                favoriteStatus =
-                    text(favoriteMonitor.status, 13f, muted).apply { setPadding(0, 0, 0, dp(6)) }
-                container.addView(favoriteStatus)
             }
         }
         val body = column()
@@ -1380,9 +1403,14 @@ class MainActivity : Activity() {
                             tvSearchPanel?.findFocus() ?: searchSuggestions?.findFocus()
                         rankSubtitle?.text =
                             ranking?.updatedText?.ifBlank { "来源：红果漫剧热播榜" } ?: "来源：红果漫剧热播榜"
+                        val focusResults = submittedSearch == requestQuery &&
+                            (searchInput as? TextView)?.text?.toString()?.trim() == requestQuery && !keepNav &&
+                            tvSearchPanel?.entry()?.hasFocus() == true
                         body.removeAllViews()
                         catalogGrid(body, keepNav || focusNav, keepType || focusType)
-                        if (keepInput) searchInput?.requestFocus()
+                        if (submittedSearch == requestQuery) submittedSearch = null
+                        if (focusResults && catalog.isNotEmpty()) continuousCatalog?.enter()
+                        else if (keepInput) searchInput?.requestFocus()
                         else if (keepSuggestion != null) keepSuggestion.requestFocus()
                     }
                 },
@@ -1500,7 +1528,11 @@ class MainActivity : Activity() {
                         else if (reservationOnline) "当前没有已上线的预约" else "当前没有待上线的预约"
                     else -> "本页没有更多内容"
                 }
+            preview.visibility = View.GONE
             message(list, if (loading) "正在加载推荐…" else empty)
+            if (!loading && (isLocalHistory() || isLocalFavorites())) {
+                addButton(list, "去首页看看") { switchTab(0) }
+            }
             if ((tab <= 2 || localCatalog()) && page > 1)
                 addButton(list, "上一页") {
                     page--
@@ -1534,17 +1566,20 @@ class MainActivity : Activity() {
             line.gravity = Gravity.TOP
             items.forEachIndexed { columnIndex, item ->
                 val card = column()
-                card.setPadding(dp(4), dp(4), dp(4), dp(9))
+                card.setPadding(dp(4), dp(4), dp(4), dp(6))
                 focusStyle(card)
                 card.contentDescription = item.title
                 card.tag = item.id
                 catalogCards[item.id] = card
                 val position = if (tab == 2) ranking?.positions?.get(item.id) else null
                 val artwork = FrameLayout(this)
-                card.addView(artwork, lp(-1, ((width - dp(8)) / TvStyle.POSTER_ASPECT).toInt()))
+                card.addView(
+                    artwork,
+                    lp(-1, ((width - dp(8)) / TvStyle.POSTER_ASPECT).roundToInt()),
+                )
                 val image =
                     ImageView(this).apply {
-                        scaleType = ImageView.ScaleType.FIT_CENTER
+                        scaleType = ImageView.ScaleType.CENTER_CROP
                         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                     }
                 artwork.addView(image, FrameLayout.LayoutParams(-1, -1))
@@ -1572,7 +1607,7 @@ class MainActivity : Activity() {
                         maxLines = 2
                         minLines = 2
                         ellipsize = TextUtils.TruncateAt.END
-                        setPadding(dp(3), dp(7), dp(3), 0)
+                        setPadding(dp(3), dp(5), dp(3), 0)
                     },
                     lp(-1, -2).apply { weight = 1f },
                 )
@@ -1607,7 +1642,7 @@ class MainActivity : Activity() {
                             maxLines = if (tab == 5) 3 else if (tab == 3 || tab == 4) 2 else 1
                             minLines = maxLines
                             minHeight =
-                                dp(if (tab == 5) 50 else if (tab == 3 || tab == 4) 34 else 19)
+                                dp(if (tab == 5) 45 else if (tab == 3 || tab == 4) 31 else 18)
                             ellipsize = TextUtils.TruncateAt.END
                             setPadding(dp(3), 0, 0, 0)
                         }
@@ -1653,7 +1688,8 @@ class MainActivity : Activity() {
                                     when {
                                         line.top < scroll.scrollY -> line.top
                                         line.bottom > scroll.scrollY + scroll.height ->
-                                            (line.bottom - scroll.height).coerceAtLeast(0)
+                                            if (line.height >= scroll.height) line.top
+                                            else (line.bottom - scroll.height).coerceAtLeast(0)
                                         else -> scroll.scrollY
                                     },
                                 )
@@ -1811,37 +1847,19 @@ class MainActivity : Activity() {
         val savedScroll = scrollPositions[catalogPageKey]
         scroll.post {
             if (catalogScroll !== scroll) return@post
-            cards.forEach { view ->
-                val card = view as LinearLayout
-                val image = card.getChildAt(0)
-                val textHeight =
-                    card.paddingTop +
-                        card.paddingBottom +
-                        (1 until card.childCount).sumOf { card.getChildAt(it).measuredHeight }
-                val target =
-                    minOf(
-                        ((width - dp(8)) / TvStyle.POSTER_ASPECT).toInt(),
-                        (scroll.height - textHeight - dp(4)).coerceAtLeast(dp(48)),
-                    )
-                if (image.layoutParams.height != target)
-                    image.layoutParams = image.layoutParams.apply { height = target }
+            savedScroll?.let { scroll.scrollTo(0, it) }
+            (cards.firstOrNull { it.hasFocus() }?.parent as? View)?.let { line ->
+                val y =
+                    when {
+                        line.top < scroll.scrollY -> line.top
+                        line.bottom > scroll.scrollY + scroll.height ->
+                            if (line.height >= scroll.height) line.top
+                            else line.bottom - scroll.height
+                        else -> scroll.scrollY
+                    }
+                scroll.scrollTo(0, y.coerceAtLeast(0))
             }
-            scroll.post settle@{
-                if (catalogScroll !== scroll) return@settle
-                savedScroll?.let { scroll.scrollTo(0, it) }
-                (cards.firstOrNull { it.hasFocus() }?.parent as? View)?.let { line ->
-                    val y =
-                        when {
-                            line.top < scroll.scrollY -> line.top
-                            line.bottom > scroll.scrollY + scroll.height ->
-                                if (line.height >= scroll.height) line.top
-                                else line.bottom - scroll.height
-                            else -> scroll.scrollY
-                        }
-                    scroll.scrollTo(0, y.coerceAtLeast(0))
-                }
-                restoringScroll = false
-            }
+            restoringScroll = false
         }
     }
 
@@ -1942,6 +1960,40 @@ class MainActivity : Activity() {
         if (row.online) return false
         tvTools.info(series.title, reservationDescription(row) + "\n上线后可在「已上线」中打开观看。", anchor)
         return true
+    }
+
+    /** Homepage overlay reuses the account reservation flow without changing detail pages. */
+    private fun showHomeRelated(series: Series, anchor: View) {
+        fun stillCurrent() = screen == "catalog" && tab == 0 && homeFeedState.current?.id == series.id
+        Toast.makeText(this, "正在读取相关作品…", Toast.LENGTH_SHORT).show()
+        work(
+            { RelatedWorks.ordered(series, repository.related(series.id)) },
+            { rows ->
+                if (stillCurrent()) {
+                    if (rows.isEmpty()) tvTools.info("相关剧集", "暂无相关剧集或可预约作品", anchor)
+                    else tvTools.choose(
+                        "${series.title} · 相关剧集",
+                        rows.map { "${it.series.title} · ${if (it.upcoming) cloudAccount.reservationLabel(it) else "查看剧集"}" },
+                        anchor,
+                        { index ->
+                            val chosen = rows[index]
+                            if (!chosen.upcoming) openDetail(chosen.series, false)
+                            else if (!cloudAccount.signedIn) cloudAccount.show()
+                            else {
+                                val accountScope = cloudAccount.historyScope
+                                cloudAccount.reserve(chosen) { message ->
+                                    if (stillCurrent() && accountScope == cloudAccount.historyScope)
+                                        tvTools.info("预约状态", message, anchor)
+                                }
+                            }
+                        },
+                        covers = rows.map { it.series.cover },
+                        loadCover = ::loadCover,
+                    )
+                }
+            },
+            { if (stillCurrent()) tvTools.choose("相关剧集读取失败", listOf("重试"), anchor, { showHomeRelated(series, anchor) }) },
+        )
     }
 
     private fun reservationDescription(row: CloudReservation): String {
@@ -2371,7 +2423,7 @@ class MainActivity : Activity() {
                             startup.text = "启动页面  ·  ${labels[choice]}"
                         }, selected = library.startupPage)
                     }
-                    toggle("首页自动试播", library.homeAutoplay) { library.homeAutoplay = it }
+                    toggle("首页自动播放", library.homeAutoplay) { library.homeAutoplay = it }
                     val clocks = listOf("关闭", "操作时显示", "始终显示")
                     lateinit var clock: TextView
                     clock = setting("播放时钟  ·  ${clocks[library.clockMode]}") {
@@ -2459,6 +2511,7 @@ class MainActivity : Activity() {
         tvSearchOpen = true
         searchDraft = clean
         query = clean
+        submittedSearch = clean
         tab = 1
         page = 1
         catalogFocus = ""
@@ -2512,19 +2565,21 @@ class MainActivity : Activity() {
         autoplay: Boolean = true,
         cloudProgress: CloudProgress? = null,
         fromRelated: Boolean = false,
+        fromHome: Boolean = false,
     ) {
         if (!fromRelated) detailTrail.clear()
         relatedSection = null
         val accountScope = cloudAccount.historyScope
         detailCloudScope = accountScope
         detailCloudProgress =
-            cloudProgress ?: if (!resume) cloudAccount.progress(series.id) else null
+            cloudProgress ?: if (!resume || fromHome) cloudAccount.progress(series.id) else null
         pendingDetail = series
         detailAutoplay = autoplay
         invalidatePage()
         releaseCatalogViews()
         screen = "detail"
-        directPlayback = resume
+        homePlayback = fromHome
+        directPlayback = resume && !fromHome
         detail = null
         synopsisExpanded = false
         val body = base(series.title)
@@ -2563,7 +2618,7 @@ class MainActivity : Activity() {
                 error(body, problem) {
                     if (cloudProgress != null && accountScope != cloudAccount.historyScope)
                         showCatalog()
-                    else openDetail(series, resume, detailAutoplay, cloudProgress, fromRelated)
+                    else openDetail(series, resume, detailAutoplay, cloudProgress, fromRelated, fromHome)
                 }
             },
         )
@@ -2592,8 +2647,13 @@ class MainActivity : Activity() {
         val hero = row()
         hero.gravity = Gravity.TOP
         hero.setPadding(0, dp(12), 0, dp(12))
-        val image = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
-        hero.addView(image, lp(dp(123), dp(174)).apply { rightMargin = dp(24) })
+        val image = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
+        hero.addView(
+            image,
+            lp(dp(123), (dp(123) / TvStyle.POSTER_ASPECT).roundToInt()).apply {
+                rightMargin = dp(24)
+            },
+        )
         loadCover(image, data.series.cover)
         val info = column()
         hero.addView(info, lp(0, -2).apply { weight = 1f })
@@ -2618,6 +2678,25 @@ class MainActivity : Activity() {
                 ellipsize = TextUtils.TruncateAt.END
             }
         info.addView(synopsis)
+        var production: Producer? = null
+        var retryProducer: () -> Unit = {}
+        lateinit var producerButton: TextView
+        producerButton = addButton(info, "制作方 · 正在读取…") {
+            val producer = production
+            if (producer == null) retryProducer()
+            else {
+                producerDialog?.close()
+                producerDialog = ProducerWorksDialog(this, repository, producer, data.series, producerButton, ::loadCover) { target ->
+                    if (target.id != data.series.id) {
+                        if (detailTrail.size >= 10) detailTrail.removeFirst()
+                        detailTrail.addLast(DetailVisit(data, episodeIndex, group, detailCloudProgress, detailCloudScope))
+                        openDetail(target, fromRelated = true)
+                    }
+                }
+            }
+        }
+        producerButton.textSize = 13f
+        producerButton.isEnabled = false
         val actions = row()
         actions.setPadding(0, dp(12), 0, 0)
         info.addView(actions)
@@ -2791,7 +2870,9 @@ class MainActivity : Activity() {
             it.textSize = 13f
             it.setTextColor(muted)
         }
+        producerButton.nextFocusDownId = play.id
         primary.forEachIndexed { i, v ->
+            v.nextFocusUpId = producerButton.id
             v.nextFocusLeftId = primary.getOrNull(i - 1)?.id ?: v.id
             v.nextFocusRightId = primary.getOrNull(i + 1)?.id ?: v.id
             v.nextFocusDownId = secondaryActions[minOf(i, secondaryActions.lastIndex)].id
@@ -2807,9 +2888,23 @@ class MainActivity : Activity() {
         fun loadRelated(force: Boolean = false) {
             section.loading()
             work(
-                { repository.related(data.series.id, force) },
-                { rows -> section.show(RelatedWorks.ordered(data.series, rows)) },
-                { section.failed() },
+                {
+                    val related = runCatching { repository.related(data.series.id, force) }
+                    if (Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException()
+                    related to runCatching { repository.producer(data.series.id) }
+                },
+                { (related, credit) ->
+                    related.fold({ section.show(RelatedWorks.ordered(data.series, it)) }, { section.failed() })
+                    credit.fold({ producer ->
+                        production = producer
+                        producerButton.text = producer?.let { "制作方：${it.name} · 查看作品 ›" } ?: "制作方：暂无资料"
+                        producerButton.isEnabled = producer != null
+                    }, {
+                        producerButton.text = "制作方资料读取失败 · 重试"
+                        producerButton.isEnabled = true
+                    })
+                },
+                { section.failed(); producerButton.text = "制作方资料读取失败 · 重试"; producerButton.isEnabled = true },
             )
         }
         section =
@@ -2854,6 +2949,7 @@ class MainActivity : Activity() {
                 },
                 { loadRelated(true) },
             )
+        retryProducer = { loadRelated(true) }
         relatedSection = section
         content.addView(section)
         if (cloudAccount.signedIn && cloudAccount.reservationState(false).message == "尚未读取预约记录")
@@ -3079,8 +3175,7 @@ class MainActivity : Activity() {
             )
         }
         playbackTitle.text = "${data.series.title}  ·  第 ${episodeIndex+1} 集"
-        playbackText.text = preparingPlaybackText(recoveryDisplayActive, lastPlaybackFailure, false) +
-            (if (recoveryDisplayActive) diagnosticSuffix() else "")
+        playbackText.text = preparingPlaybackText(recoveryDisplayActive, lastPlaybackFailure, false)
         progressBar.progress = 0
         progressBar.visibility = View.VISIBLE
         main.removeCallbacks(hideHud)
@@ -3572,7 +3667,7 @@ class MainActivity : Activity() {
                 total = if (allowSlowRecovery) recovery.total else RecoveryBudget.FAST_ATTEMPTS,
                 remainingMillis = remainingMillis,
                 positionText = formatTime(retryPosition),
-            ) + diagnosticSuffix()
+            )
     }
 
     private fun scheduleRecovery() {
@@ -3582,7 +3677,7 @@ class MainActivity : Activity() {
             autoRecovery = false
             playbackText.text = (if (recovery.remaining)
                 "$lastPlaybackFailure\n快速恢复暂未成功，可立即重试、换集或选择继续等待。"
-                else recoveryExhaustedText(lastPlaybackFailure)) + diagnosticSuffix()
+                else recoveryExhaustedText(lastPlaybackFailure))
             recoveryAction?.apply {
                 text = if (recovery.remaining) "继续等待恢复" else "恢复次数已用尽"
                 isEnabled = recovery.remaining
@@ -3591,8 +3686,7 @@ class MainActivity : Activity() {
         }
         if (!networkAvailable()) {
             playbackText.text =
-                "$lastPlaybackFailure\n网络已断开，联网后自动续播 · 第 ${episodeIndex+1} 集 ${formatTime(retryPosition)}" +
-                    diagnosticSuffix()
+                "$lastPlaybackFailure\n网络已断开，联网后自动续播 · 第 ${episodeIndex+1} 集 ${formatTime(retryPosition)}"
             return
         }
         val plannedDelay = recovery.delayMillis ?: return
@@ -3606,8 +3700,8 @@ class MainActivity : Activity() {
         main.postDelayed(recoveryCountdown, 1000)
     }
 
-    /** 错误页末尾的脱敏诊断行（issue #38）：机型/系统/版本/失败阶段/恢复计数，便于截图定位。 */
-    private fun diagnosticSuffix(): String =
+    /** 按需展示的脱敏诊断详情（issue #38）：机型/系统/版本/失败阶段/恢复计数，便于截图定位。 */
+    private fun playbackDiagnostics(): String =
         try {
             "\n" +
                 diagnosticLine(
@@ -4117,7 +4211,7 @@ class MainActivity : Activity() {
                 decoding && lowerTier != null -> "电视无法解码当前视频，可尝试更低清晰度。"
                 decoding -> "电视无法解码当前视频，本集没有更低清晰度可用。"
                 else -> "$lastPlaybackFailure · 可手动重试"
-            } + diagnosticSuffix()
+            }
         val actions = row()
         controls.addView(actions)
         val retryButton = addButton(actions, "立即重试") { playEpisode(episodeIndex, retryPosition, retryAutoplay) }
@@ -4129,11 +4223,12 @@ class MainActivity : Activity() {
             }
         }
         addButton(actions, "返回选集") { returnToDetail(true) }
+        addButton(actions, "查看错误详情") { tvTools.info("播放诊断", playbackDiagnostics().trim(), currentFocus) }
         if (retryable && !sleepStopped) {
             recoveryAction = addButton(controls, "停止自动重试") {
                 if (autoRecovery) {
                     cancelRecovery()
-                    playbackText.text = "$lastPlaybackFailure\n自动恢复已停止，观看位置已保留。" + diagnosticSuffix()
+                    playbackText.text = "$lastPlaybackFailure\n自动恢复已停止，观看位置已保留。"
                     recoveryAction?.text = "继续等待恢复"
                 } else {
                     allowSlowRecovery = true
@@ -4194,7 +4289,7 @@ class MainActivity : Activity() {
         recoveryDisplayActive = false
         playError = true
         progressBar.visibility = View.GONE
-        playbackText.text = "$lastPlaybackFailure\n恢复已取消，观看位置已保留。" + diagnosticSuffix()
+        playbackText.text = "$lastPlaybackFailure\n恢复已取消，观看位置已保留。"
         controls.removeAllViews()
         addButton(controls, "立即重试") { playEpisode(episodeIndex, retryPosition, retryAutoplay) }
         addButton(controls, "返回选集") { returnToDetail(true) }
@@ -4223,8 +4318,7 @@ class MainActivity : Activity() {
         if (waitingForFirstFrame && !sleepStopped) {
             playbackText.text = if (!requestedAutoplay && playbackReady)
                 (if (recoveryDisplayActive) "$lastPlaybackFailure\n" else "") + "已准备好 · 保持暂停，按播放开始"
-                else preparingPlaybackText(recoveryDisplayActive, lastPlaybackFailure, video != null) +
-                    (if (recoveryDisplayActive) diagnosticSuffix() else "")
+                else preparingPlaybackText(recoveryDisplayActive, lastPlaybackFailure, video != null)
             return
         }
         if (sleepStopped) {
@@ -4626,7 +4720,7 @@ class MainActivity : Activity() {
         return "%02d:%02d".format(seconds / 60, seconds % 60)
     }
 
-    // 保存正式观看进度；首页试播使用独立状态，不从此处写入观看记录。
+    // 正式播放器与首页均写入同一本机片库，并复用账户上传节流。
     private fun saveProgress(completed: Boolean = false) {
         val p = player ?: return
         val data = detail ?: return
@@ -4757,6 +4851,7 @@ class MainActivity : Activity() {
     }
 
     private fun returnToDetail(forceDetail: Boolean = false) {
+        homePlayback = false
         sleepTimer.cancel()
         sleepStopped = false
         saveProgress()
@@ -4789,9 +4884,15 @@ class MainActivity : Activity() {
             nav[1].requestFocus()
             return
         }
+        if (screen == "catalog" && tab == 2 && !nav[2].hasFocus()) {
+            rankingScreen?.backToTop()
+            nav[2].requestFocus()
+            return
+        }
         when (screen) {
             "player" ->
-                if (waitingForFirstFrame) returnToDetail()
+                if (homePlayback) returnToDetail(forceDetail = true)
+                else if (waitingForFirstFrame) returnToDetail()
                 else if (hud.visibility == View.VISIBLE && !playError) hidePlaybackOverlay()
                 else returnToDetail()
             "detail" -> {
@@ -4823,7 +4924,13 @@ class MainActivity : Activity() {
     @Deprecated("TV remote back is handled through the activity")
     override fun onBackPressed() = goBack()
 
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        gradualPreloader?.yieldToUser()
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) gradualPreloader?.yieldToUser()
         if (screen == "player") {
             if (panel && !playError && event.action == KeyEvent.ACTION_DOWN) showHud()
             val key = event.keyCode
@@ -4906,6 +5013,8 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         foreground = true
+        startGradualPreloading()
+        gradualPreloader?.resume()
         social.foreground(true)
         main.removeCallbacks(tick)
         main.post(tick)
@@ -4958,6 +5067,7 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        gradualPreloader?.pause()
         stallGuard.suspendObservation()
         cancelNextSeason()
         searchSuggestions?.cancel()
@@ -5000,12 +5110,14 @@ class MainActivity : Activity() {
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) gradualPreloader?.pause()
         if (::artwork.isInitialized) artwork.trimMemory(level)
         if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) cancelPrefetch()
     }
 
     // 页面销毁时释放播放器、请求和工作线程，避免资源继续持有旧 Activity。
     override fun onDestroy() {
+        gradualPreloader?.close()
         generation++
         cancelWork()
         if (networkRegistered) connectivity.unregisterNetworkCallback(networkCallback)

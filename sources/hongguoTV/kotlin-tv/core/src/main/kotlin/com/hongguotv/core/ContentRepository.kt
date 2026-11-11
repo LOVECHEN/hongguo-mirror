@@ -155,6 +155,9 @@ class StreamLadder(val renditions: List<Rendition>) {
 
 class ContentHttpException(val statusCode: Int) : IOException("内容请求失败（HTTP $statusCode）")
 
+private class PlaybackModelRejectedException(val code: Int) : IOException("播放接口暂不可用（错误码 $code）")
+private class PlaybackServiceBackoffException : IOException("播放服务繁忙，请稍后重试")
+
 class SearchSessionExpiredException : IOException("搜索结果已过期，请从第 1 页重新搜索")
 
 /** `detail` 仅携带路径代号、HTTP/字节数/协议与注册结果，不含地址与凭据。 */
@@ -293,6 +296,43 @@ constructor(
         }
     }
 
+    /** 单集播放协议使用真实 Gorgon/Argus/Ladon；不能混用旧 Medusa 签名或账户 Cookie。 */
+    private fun singleVideoModel(id: String, identity: PlaybackDeviceSession.Profile,
+        trace: PlaybackRequestTrace, client: OkHttpClient): JSONObject {
+        val now = clock()
+        val allowed = setOf("ac", "channel", "aid", "app_name", "version_code", "version_name",
+            "device_platform", "os", "ssmix", "device_type", "device_brand", "language", "os_api",
+            "os_version", "manifest_version_code", "resolution", "dpi", "update_version_code", "device_id", "iid")
+        val profile = identity.values.filterKeys { it in allowed } + mapOf(
+            "version_code" to "73532", "version_name" to "7.3.5.32", "manifest_version_code" to "73532",
+            "update_version_code" to "73532", "_rticket" to now.toString())
+        val query = Signer.encode(profile.toSortedMap())
+        val payload = """{"biz_param":{"need_all_video_definition":true,"video_platform":3},"content_type":1,"video_id":"$id"}""".toByteArray()
+        val request = Request.Builder()
+            .url("https://${PlayRetryPlan.host(0)}/novel/player/video_model/v1/?$query")
+            .header("User-Agent", VendorConstants.VIDEO_UA.replace("/71332", "/73532"))
+            .header("Accept", "application/json").header("Sdk-Version", "2").header("X-XS-From-Web", "0")
+            .post(payload.toRequestBody("application/json; charset=utf-8".toMediaType()))
+        PlayerSignature().headers(query, payload, identity.values.getValue("device_id"), now)
+            .forEach { (key, value) -> request.header(key, value) }
+        // The caller may have a catalogue cookie jar; this protocol must remain anonymous.
+        val anonymous = client.newBuilder().cookieJar(okhttp3.CookieJar.NO_COOKIES).build()
+        val raw = fetchPlaybackModel(request, anonymous, trace, PlaybackRequestTrace.Stage.SINGLE)
+        val root = try { JSONObject(raw) } catch (_: Exception) { throw IOException("播放信息格式异常") }
+        val code = root.optInt("code", root.optInt("Code", 0))
+        if (code != 0) throw PlaybackModelRejectedException(code)
+        val data = root.optJSONObject("data") ?: throw IOException("播放信息为空")
+        val encoded = data.opt("video_model")
+        val model = when (encoded) {
+            is JSONObject -> encoded
+            is String -> runCatching { JSONObject(encoded) }.getOrElse {
+                runCatching { JSONObject(String(decode64(encoded), Charsets.UTF_8)) }.getOrNull()
+            }
+            else -> data.takeIf { it.optJSONArray("video_list") != null }
+        } ?: throw IOException("播放信息格式异常")
+        return JSONObject().put("video_model", model)
+    }
+
     /** 单次请求执行：HTTP 状态、响应大小与空响应判定；重试策略由调用方决定。 */
     private fun fetchOnce(
         request: Request.Builder, client: OkHttpClient, refreshTicket: Boolean,
@@ -332,7 +372,10 @@ constructor(
             if (bytes.size > 16 * 1024 * 1024) throw IOException("内容响应过大")
             observed?.invoke(response.code, bytes.size, response.protocol)
             val content = String(bytes, Charsets.UTF_8)
-            if (rejectEmptyPlayback && content.isBlank()) throw EmptyPlaybackResponseException()
+            if (rejectEmptyPlayback && content.isBlank()) {
+                if (!response.header("Retry-After").isNullOrBlank()) throw PlaybackServiceBackoffException()
+                throw EmptyPlaybackResponseException()
+            }
             content
         }
     }
@@ -395,7 +438,22 @@ constructor(
         return ComicRank.parse(text("$site/rank/hot-comic-drama?page=$page"), page)
     }
 
-    fun rankPage(board: RankBoard, page: Int = 1): CatalogPage {
+    private val warmRanks = WarmPageCache<CatalogPage>(20)
+    private val warmDiscovery = WarmPageCache<FilteredDiscoveryPage>(4)
+    private val warmDetails = WarmPageCache<Detail>(12)
+
+    fun warmRankPage(board: RankBoard, page: Int): CatalogPage = fetchRankPage(board, page).also {
+        warmRanks.put("${board.name}:$page", it)
+    }
+    fun warmDiscovery(): FilteredDiscoveryPage = fetchFilteredDiscovery(DiscoverySelection(), null).also {
+        warmDiscovery.put("default", it)
+    }
+    fun warmDetail(id: String) { warmDetails.put(id, fetchDetail(id)) }
+
+    fun rankPage(board: RankBoard, page: Int = 1): CatalogPage =
+        warmRanks.take("${board.name}:$page") ?: fetchRankPage(board, page)
+
+    private fun fetchRankPage(board: RankBoard, page: Int): CatalogPage {
         require(page in 1..100)
         // 榜单走收紧超时的专用客户端并重试一次瞬时失败；ttwid 由内存 Cookie 罐自动携带。
         val body =
@@ -440,7 +498,11 @@ constructor(
     fun filteredDiscovery(
         selection: DiscoverySelection,
         cursor: DiscoveryCursor? = null,
-    ): FilteredDiscoveryPage {
+    ): FilteredDiscoveryPage =
+        (if (cursor == null && selection.values.isEmpty()) warmDiscovery.take("default") else null)
+            ?: fetchFilteredDiscovery(selection, cursor)
+
+    private fun fetchFilteredDiscovery(selection: DiscoverySelection, cursor: DiscoveryCursor?): FilteredDiscoveryPage {
         val values = VendorConstants.device.toMutableMap()
         for (key in
             listOf(
@@ -645,6 +707,52 @@ constructor(
         return CatalogPage(valid(list), tab.optBoolean("has_more", false) && page < 100)
     }
 
+    private val producerCredits = linkedMapOf<String, ProducerCredit>()
+
+    private fun producerMetadata(ids: List<String>): Map<String, ProducerCredit> {
+        require(ids.all { it.matches(Regex("[0-9]{1,30}")) })
+        val result = synchronized(producerCredits) { producerCredits.filterKeys { it in ids } }.toMutableMap()
+        for (batch in ids.distinct().filterNot { it in result }.chunked(20)) {
+            val signed = signer.sign(
+                "https://api5-normal-sinfonlinec.fqnovel.com/reading/bookapi/multi-detail/v1/",
+                VendorConstants.device + mapOf("book_id" to batch.joinToString(","), "book_type" to "2"),
+            )
+            val rows = Producers.parse(JSONObject(text(signed.url, signed))).filterKeys { it in batch }
+            result.putAll(rows)
+            synchronized(producerCredits) {
+                producerCredits.putAll(rows)
+                while (producerCredits.size > 200) producerCredits.remove(producerCredits.keys.first())
+            }
+        }
+        return result
+    }
+
+    fun producer(id: String): Producer? = producerMetadata(listOf(id))[id]?.producer
+
+    /** Known related works are useful even when the upstream search service is unavailable. */
+    fun relatedProducerWorks(producer: Producer, current: Series): List<Series> {
+        val candidates = listOf(current) + related(current.id).filterNot { it.upcoming }.map { it.series }
+        return Producers.verified(producer, candidates, producerMetadata(candidates.map { it.id }))
+    }
+
+    /** Search is a candidate source, never proof of attribution or a complete filmography. */
+    fun producerWorks(producer: Producer, page: Int = 1): ProducerPage {
+        require(producer.name.isNotBlank() && producer.name.length <= 200 && page in 1..100)
+        val raw = JSONObject(text("$site/api/search/result?query=${Signer.encode(producer.name)}&page=$page"))
+        val rows = raw.optJSONArray("searchList") ?: throw IOException("制作方作品检索暂不可用，请稍后重试")
+        if (raw.has("pageNum") && raw.optInt("pageNum") != page) throw IOException("作品页码不匹配，请重新打开")
+        val candidates = valid(rows.objects().filter {
+            it.optJSONObject("video_data")?.str("genre") in listOf("203", "205")
+        }.map(::card))
+        val verified = Producers.verified(producer, candidates, producerMetadata(candidates.map { it.id }))
+        val more = when {
+            raw.has("hasMore") -> raw.optBoolean("hasMore")
+            raw.optInt("totalPages") > 0 -> page < raw.optInt("totalPages")
+            else -> rows.length() > 0
+        }
+        return ProducerPage(verified, more && page < 100)
+    }
+
     private val relatedCache = linkedMapOf<String, List<RelatedWork>>()
 
     fun related(id: String, force: Boolean = false): List<RelatedWork> {
@@ -714,7 +822,9 @@ constructor(
         throw IOException("相关作品暂时无法加载，请重试", failure)
     }
 
-    fun detail(id: String): Detail {
+    fun detail(id: String): Detail = warmDetails.take(id) ?: fetchDetail(id)
+
+    private fun fetchDetail(id: String): Detail {
         require(id.matches(Regex("[0-9]{1,30}")))
         val o =
             router("$site/detail?series_id=$id")
@@ -887,8 +997,7 @@ constructor(
             cached
                 ?: RequestScope.withDeadline(deadline) {
                     val ids = (listOf(id) + metadataAhead).distinct()
-                    // GET video_tab 优先（官方 App 现行路径，2026-11-05 起对无签名请求短路返回
-                    // 空正文）；失败时回退签名 POST 旧接口，两条路径共用同一注册身份。
+                    // 单集接口优先；旧批量接口仅保留为有界兼容回退，两者复用注册身份。
                     val trace = PlaybackRequestTrace()
                     fun transport(fresh: Boolean = false): OkHttpClient {
                         val remaining = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())
@@ -973,11 +1082,10 @@ constructor(
                         val route = pendingRoutes.removeFirst()
                         val attempt = attempts++
                         val client = transport(fresh = attempt > 0)
-                        if (!route.get) postCount++
+                        if (!route.single) postCount++
                         try {
-                            val row = if (route.get) {
-                                tabVideoModel(id, identity, trace, client, strict = true)
-                                    ?: throw IOException("首选播放信息格式或业务状态异常")
+                            val row = if (route.single) {
+                                singleVideoModel(id, identity, trace, client)
                             } else {
                                 val request = playbackRequest(
                                     "https://${route.host}/novel/player/multi_video_model/v1/",
@@ -1007,13 +1115,16 @@ constructor(
                             break
                         } catch (error: IOException) {
                             RequestScope.ensureActive()
+                            if (error is PlaybackServiceBackoffException ||
+                                error is ContentHttpException && error.statusCode in 400..499 ||
+                                error is PlaybackModelRejectedException && error.code != 100103) throw error
                             lastError = error
                             val empty = error is EmptyPlaybackResponseException
                             allEmpty = allEmpty && empty
-                            if (!route.get && empty) emptyPosts++
-                            if (route.get || empty || PlayRetryPlan.temporary(error)) identity.routes.failed(route, clock(), empty)
-                            // GET 结构不符仍可换备用接口；POST 明确业务/格式错误不继续盲试。
-                            if (!route.get && !PlayRetryPlan.temporary(error)) throw error
+                            if (!route.single && empty) emptyPosts++
+                            if (route.single || empty || PlayRetryPlan.temporary(error)) identity.routes.failed(route, clock(), empty)
+                            // 单集接口明确不支持该参数时可回退；拒绝/限流已在上方停止。批量格式错误不盲试。
+                            if (!route.single && !PlayRetryPlan.temporary(error)) throw error
                         } finally {
                             if (attempt > 0) client.connectionPool.evictAll()
                         }

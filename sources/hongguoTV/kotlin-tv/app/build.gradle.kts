@@ -21,8 +21,17 @@ android {
         applicationId = "com.hongguotv.nativeapp"
         minSdk = 21
         targetSdk = 36
-        versionCode = System.getenv("HONGGUOTV_VERSION_CODE")?.toInt() ?: 13
-        versionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "0.11.1"
+        versionCode = System.getenv("HONGGUOTV_VERSION_CODE")?.toInt() ?: 16
+        versionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "0.13.1"
+    }
+    // Formal publishing always requests all three installable APKs.
+    splits {
+        abi {
+            isEnable = providers.gradleProperty("releaseAbis").orNull == "true"
+            reset()
+            include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            isUniversalApk = true
+        }
     }
     buildFeatures { buildConfig = true }
     testOptions {
