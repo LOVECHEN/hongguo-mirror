@@ -68,6 +68,12 @@ class TvTools(private val activity: Activity) {
         next.window?.setDimAmount(.6f)
     }
 
+    internal fun dispatchPhoneKey(event: android.view.KeyEvent): Boolean {
+        val modal = dialog?.takeIf { it.isShowing } ?: return false
+        modal.dispatchKeyEvent(event)
+        return true
+    }
+
     fun close() {
         dialog?.dismiss()
         phone?.close()
@@ -283,13 +289,13 @@ class TvTools(private val activity: Activity) {
         var replace = true
         val value = label(digits, 28f).apply { gravity = Gravity.CENTER }
         content.addView(value)
-        val error = label("定位到该集，再按确认播放", 14f)
+        val error = label("输入集数后，选择「播放此集」", 14f)
         content.addView(error)
         fun digit(key: String) {
             digits = if (replace) key else (digits + key).take(6)
             replace = false
             value.text = digits
-            error.text = "定位到该集，再按确认播放"
+            error.text = "输入集数后，选择「播放此集」"
         }
         fun erase() {
             digits = if (replace) "" else digits.dropLast(1)
@@ -338,7 +344,7 @@ class TvTools(private val activity: Activity) {
                 .setTitle("跳转集数 · 1—$count")
                 .setView(ScrollView(activity).apply { addView(content) })
                 .setNegativeButton("取消", null)
-                .setPositiveButton("定位", null)
+                .setPositiveButton("播放此集", null)
                 .create()
         next.setOnKeyListener { _, key, event ->
             when {
@@ -386,6 +392,18 @@ class TvTools(private val activity: Activity) {
             setImageBitmap(Bitmap.createBitmap(pixels, 360, 360, Bitmap.Config.ARGB_8888))
             contentDescription = "二维码"
         }
+
+    fun phoneConsole(url: String, anchor: View?, disconnect: () -> Unit) {
+        val content = column()
+        val row = LinearLayout(activity).apply { gravity = Gravity.CENTER_VERTICAL }
+        row.addView(qr(url), LinearLayout.LayoutParams(dp(185), dp(185)))
+        row.addView(label("手机扫码后用浏览器打开。\n关闭此窗口后仍可控制，播放中也能使用。\n电视退出应用后连接失效；请勿分享二维码。", 16f), LinearLayout.LayoutParams(0, -2, 1f))
+        content.addView(row)
+        content.addView(label(url, 12f))
+        open(AlertDialog.Builder(activity).setTitle("手机控制台")
+            .setView(content).setPositiveButton("继续看电视", null)
+            .setNegativeButton("断开所有手机") { _, _ -> disconnect() }.create(), anchor)
+    }
 
     fun phoneInput(
         anchor: View?,

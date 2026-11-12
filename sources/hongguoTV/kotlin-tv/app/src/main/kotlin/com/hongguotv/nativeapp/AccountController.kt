@@ -139,6 +139,7 @@ class AccountController(private val activity: Activity, private val play: (Cloud
             .callTimeout(30, TimeUnit.SECONDS)
             .build()
     private val store = AccountStore(activity)
+    private val phoneRetryGate = PhoneLogin.RetryGate { android.os.SystemClock.elapsedRealtime() }
     @Volatile private var generation = 0
     @Volatile private var closed = false
     private var accountRestored = false
@@ -148,10 +149,12 @@ class AccountController(private val activity: Activity, private val play: (Cloud
     private var history = emptyList<CloudProgress>()
     private var historyLoaded = false
     private val acceptedReservations = mutableSetOf<String>()
+    private val pendingReservations = mutableSetOf<String>()
     private var favorites = FavoriteState()
-    private val unconfirmedFavorites = mutableSetOf<String>()
+    private val unconfirmedFavorites = mutableMapOf<String, Boolean>()
     private var reservations = emptyMap<Boolean, ReservationState>()
-    private var status = "未登录"
+    internal var status = "未登录"
+        private set
     private var busy = false
     private var lastUpload = 0L
     private var lastEpisode = ""
@@ -208,39 +211,49 @@ class AccountController(private val activity: Activity, private val play: (Cloud
             reservationState(false).rows.any {
                 it.series.id == work.series.id || it.series.id == "reservation:${work.series.id}"
             } -> "已预约"
-            work.series.id in acceptedReservations -> "刷新预约状态"
+            work.series.id in pendingReservations -> "预约中…"
+            work.series.id in acceptedReservations -> "已提交"
             else -> "预约"
         }
 
     fun reserve(work: RelatedWork, done: (String) -> Unit) {
-        val account =
-            credentials
-                ?: run {
-                    show()
-                    return
-                }
-        if (busy) {
-            toast("账号操作进行中，请稍候")
-            return
-        }
-        if (reservationLabel(work) == "已预约") {
-            done("该作品已在当前账号的预约列表中")
-            return
-        }
-        if (work.series.id in acceptedReservations) {
-            refreshReservations()
-            done("正在刷新预约列表，请稍后核对；未显示前暂不能确认预约生效。")
-            return
-        }
+        val account = credentials ?: run { show(); done("请先登录"); return }
+        if (busy || closed) { done("正在处理，请稍候"); return }
+        if (reservationLabel(work) == "已预约") { done("已预约"); return }
+        val submitted = work.series.id in acceptedReservations
+        val token = generation
+        pendingReservations += work.series.id
         task(
-            { client.reserve(account, work) },
             {
-                acceptedReservations += work.series.id
-                changed()
-                done("红果已接受预约请求，尚未在账号列表确认。请刷新预约状态，或在手机红果核对是否新增。")
+                if (!submitted) client.reserve(account, work)
+                // Verify automatically, with one bounded retry for eventual consistency.
+                var rows: List<CloudReservation>? = null
+                for (attempt in 0..1) {
+                    if (closed || token != generation) break
+                    if (attempt > 0) Thread.sleep(750)
+                    if (closed || token != generation) break
+                    rows = runCatching { client.reservations(account, false) }.getOrNull() ?: rows
+                    if (rows.orEmpty().any { it.series.id == work.series.id || it.series.id == "reservation:${work.series.id}" }) break
+                }
+                rows
             },
-            { done("预约未完成：${safeError(it)}") },
+            { rows ->
+                pendingReservations -= work.series.id
+                acceptedReservations += work.series.id
+                if (rows != null) reservations = reservations + (false to ReservationState(
+                    rows, loaded = true, message = "已读取 ${rows.size} 部预约记录"))
+                val confirmed = reservationLabel(work) == "已预约"
+                if (confirmed) acceptedReservations -= work.series.id
+                changed()
+                done(if (confirmed) "已预约" else "预约已提交")
+            },
+            {
+                pendingReservations -= work.series.id
+                changed()
+                done("预约未完成，请重试")
+            },
         )
+        changed()
     }
 
     internal fun favoriteState(): FavoriteState =
@@ -250,81 +263,68 @@ class AccountController(private val activity: Activity, private val play: (Cloud
 
     fun favoriteNeedsRefresh(id: String) = id in unconfirmedFavorites
 
+    fun favoriteTarget(id: String) = unconfirmedFavorites[id] ?: !accountFavorite(id)
+
     fun favoriteActionLabel(id: String): String =
         when {
             !signedIn -> "登录后加入账户收藏"
             favorites.loading -> "账户收藏处理中…"
-            favoriteNeedsRefresh(id) -> "刷新账户收藏状态"
+            favoriteNeedsRefresh(id) -> if (favoriteTarget(id)) "收藏待同步" else "取消待同步"
             accountFavorite(id) -> "取消账户收藏"
             else -> "加入账户收藏"
         }
 
     fun changeFavorite(series: Series, add: Boolean, done: (String) -> Unit) {
-        val account =
-            credentials
-                ?: run {
-                    show()
-                    return
-                }
-        if (closed || favorites.loading) {
-            done("账户收藏正在处理，请稍候")
-            return
-        }
-        if (favoriteNeedsRefresh(series.id)) {
-            refreshFavorites()
-            done("上次操作尚未确认，已刷新账户收藏，请核对后再操作。")
-            return
-        }
+        val account = credentials ?: run { show(); done("请先登录"); return }
+        if (closed || favorites.loading) { done("正在处理，请稍候"); return }
+        val pending = unconfirmedFavorites[series.id]
+        if (pending != null && pending != add) { done("上次操作正在同步"); return }
         val token = generation
-        favorites = favorites.copy(loading = true, message = "正在核对并更新账户收藏…")
+        favorites = favorites.copy(loading = true, message = "正在更新收藏…")
         changed()
         worker.execute {
             var attempted = false
+            var acknowledged = false
             val result = runCatching {
                 check(!closed && token == generation)
-                val before = client.favorites(account)
-                if (before.any { it.series.id == series.id } == add) before to false
-                else {
-                    check(!closed && token == generation)
-                    attempted = true
-                    client.setFavorite(account, series.id, add)
-                    check(!closed && token == generation)
-                    client.favorites(account) to true
+                var rows = client.favorites(account)
+                if (rows.any { it.series.id == series.id } != add) {
+                    if (pending == null) {
+                        check(!closed && token == generation)
+                        attempted = true
+                        // A lost response may still have applied the write: only retry reads.
+                        acknowledged = runCatching { client.setFavorite(account, series.id, add) }.isSuccess
+                    }
+                    for (attempt in 0..1) {
+                        check(!closed && token == generation)
+                        if (attempt > 0) Thread.sleep(750)
+                        check(!closed && token == generation)
+                        rows = runCatching { client.favorites(account) }.getOrNull() ?: rows
+                        if (rows.any { it.series.id == series.id } == add) break
+                    }
                 }
+                rows
             }
             main.post {
                 if (closed || token != generation) return@post
-                val message =
-                    result.fold(
-                        { (rows, wrote) ->
-                            val confirmed = rows.any { it.series.id == series.id } == add
-                            if (confirmed) unconfirmedFavorites.remove(series.id)
-                            else unconfirmedFavorites.add(series.id)
-                            favorites =
-                                FavoriteState(
-                                    rows,
-                                    loaded = true,
-                                    message =
-                                        if (confirmed) "已核对账户收藏，共读取 ${rows.size} 部"
-                                        else "请求已提交，列表尚未确认，请刷新或在手机核对",
-                                )
-                            if (!confirmed) "请求已提交，但账户列表尚未确认生效。请刷新或在手机红果核对，不要连续重复提交。"
-                            else if (wrote) if (add) "已加入账户收藏，并已在账户列表确认" else "已取消账户收藏，并已从本次读取的列表移除"
-                            else if (add) "这部剧已在账户收藏中，无需重复添加" else "本次读取的账户列表中已没有这部剧，无需重复取消"
-                        },
-                        { error ->
-                            if (attempted) unconfirmedFavorites.add(series.id)
-                            favorites =
-                                favorites.copy(
-                                    loading = false,
-                                    message =
-                                        if (attempted) "收藏操作未确认，请刷新或在手机核对"
-                                        else "读取失败：${safeError(error)}",
-                                )
-                            if (attempted) "收藏操作未确认：${safeError(error)}。请先刷新或在手机核对。"
-                            else "未修改账户收藏：${safeError(error)}"
-                        },
-                    )
+                val message = result.fold(
+                    { rows ->
+                        val confirmed = rows.any { it.series.id == series.id } == add
+                        if (confirmed) unconfirmedFavorites.remove(series.id)
+                        else unconfirmedFavorites[series.id] = add
+                        val text = if (confirmed) if (add) "已收藏" else "已取消收藏"
+                            else if (acknowledged) if (add) "收藏已提交" else "取消已提交"
+                            else "收藏暂未同步"
+                        favorites = FavoriteState(rows, loaded = true, message = text)
+                        text
+                    },
+                    {
+                        if (attempted) unconfirmedFavorites[series.id] = add
+                        val text = if (attempted || pending != null) "收藏暂未同步" else "收藏未完成，请重试"
+                        favorites = favorites.copy(loading = false, message = text)
+                        text
+                    },
+                )
                 changed()
                 done(message)
             }
@@ -345,7 +345,8 @@ class AccountController(private val activity: Activity, private val play: (Cloud
                 favorites =
                     result.fold(
                         {
-                            unconfirmedFavorites.clear()
+                            val present = it.map { row -> row.series.id }.toSet()
+                            unconfirmedFavorites.entries.removeAll { entry -> (entry.key in present) == entry.value }
                             FavoriteState(it, loaded = true, message = "已读取 ${it.size} 部账户收藏")
                         },
                         { favorites.copy(loading = false, message = "读取失败：${safeError(it)}") },
@@ -398,6 +399,12 @@ class AccountController(private val activity: Activity, private val play: (Cloud
 
     private fun changed() {
         onHistoryChanged?.invoke()
+    }
+
+    internal fun dispatchPhoneKey(event: android.view.KeyEvent): Boolean {
+        val modal = dialog?.takeIf { it.isShowing } ?: return false
+        modal.dispatchKeyEvent(event)
+        return true
     }
 
     val showing
@@ -584,7 +591,10 @@ class AccountController(private val activity: Activity, private val play: (Cloud
                 addView(hint)
             }
 
+        lateinit var phoneDialog: AlertDialog
         var login: PhoneLogin? = null
+        var requestInFlight = false
+        var resendAt = 0L
         var countdown: Runnable? = null
         fun stopCountdown() {
             countdown?.let(main::removeCallbacks)
@@ -592,23 +602,27 @@ class AccountController(private val activity: Activity, private val play: (Cloud
         }
         fun startCountdown(seconds: Int) {
             stopCountdown()
-            var left = seconds.coerceIn(1, 600)
+            resendAt = maxOf(resendAt, android.os.SystemClock.elapsedRealtime() + seconds.toLong() * 1000)
+            fun secondsLeft() =
+                ((resendAt - android.os.SystemClock.elapsedRealtime() + 999) / 1000).coerceAtLeast(0)
             val tick =
                 object : Runnable {
                     override fun run() {
-                        if (dialog?.isShowing != true) return
-                        send.isEnabled = left <= 0
+                        if (!phoneDialog.isShowing) return
+                        val left = secondsLeft()
+                        val limited = phoneRetryGate.remainingSeconds() > 0
+                        send.isEnabled = left <= 0 && !limited && !requestInFlight
+                        phoneDialog.getButton(AlertDialog.BUTTON_POSITIVE)?.isEnabled =
+                            !limited && !requestInFlight
                         send.text = if (left > 0) "${left}s 后重发" else "获取验证码"
                         if (left > 0) {
-                            left--
                             main.postDelayed(this, 1000)
                         }
                     }
                 }
             countdown = tick
             send.isEnabled = false
-            send.text = "${left}s 后重发"
-            left--
+            send.text = "${secondsLeft()}s 后重发"
             main.postDelayed(tick, 1000)
         }
 
@@ -621,9 +635,10 @@ class AccountController(private val activity: Activity, private val play: (Cloud
                 .setNegativeButton("取消", null)
                 .setOnDismissListener { stopCountdown() }
                 .create()
-                .also { it.show() }
+                .also { phoneDialog = it; it.show() }
 
-        dialog?.getButton(AlertDialog.BUTTON_POSITIVE)?.setOnClickListener {
+        phoneDialog.getButton(AlertDialog.BUTTON_POSITIVE)?.setOnClickListener {
+            if (requestInFlight) return@setOnClickListener
             val current = login
             val value = code.text.toString().trim()
             if (current == null) {
@@ -634,7 +649,9 @@ class AccountController(private val activity: Activity, private val play: (Cloud
                 hint.text = "请输入 4—8 位验证码"
                 return@setOnClickListener
             }
-            dialog?.getButton(AlertDialog.BUTTON_POSITIVE)?.isEnabled = false
+            phoneDialog.getButton(AlertDialog.BUTTON_POSITIVE)?.isEnabled = false
+            requestInFlight = true
+            send.isEnabled = false
             hint.text = "正在登录…"
             task(
                 { validatePhoneAccount(current.verify(value)).also { store.save(it.first) } },
@@ -643,9 +660,15 @@ class AccountController(private val activity: Activity, private val play: (Cloud
                     acceptAccount(next, account)
                 },
                 { failure ->
-                    dialog?.getButton(AlertDialog.BUTTON_POSITIVE)?.isEnabled = true
+                    if (!phoneDialog.isShowing || dialog !== phoneDialog) return@task
+                    requestInFlight = false
+                    startCountdown(0)
+                    phoneDialog.getButton(AlertDialog.BUTTON_POSITIVE)?.isEnabled = true
                     hint.text = safeError(failure)
-                    if (failure is PhoneLogin.Failure && !failure.canRetryCode)
+                    if (failure is PhoneLogin.Failure && failure.retrySeconds > 0) {
+                        phoneDialog.getButton(AlertDialog.BUTTON_POSITIVE)?.isEnabled = false
+                        startCountdown(failure.retrySeconds)
+                    } else if (failure is PhoneLogin.Failure && !failure.canRetryCode)
                         phoneLoginFailure(failure)
                 },
             )
@@ -659,6 +682,7 @@ class AccountController(private val activity: Activity, private val play: (Cloud
         }
 
         send.setOnClickListener {
+            if (requestInFlight) return@setOnClickListener
             val typed = mobile.text.toString().trim()
             val number =
                 runCatching {
@@ -670,7 +694,10 @@ class AccountController(private val activity: Activity, private val play: (Cloud
                         hint.text = safeError(it)
                         return@setOnClickListener
                     }
-            val fresh = PhoneLogin(phoneHttp)
+            val fresh = PhoneLogin(phoneHttp, phoneRetryGate)
+            login = null
+            requestInFlight = true
+            phoneDialog.getButton(AlertDialog.BUTTON_POSITIVE)?.isEnabled = false
             stopCountdown()
             send.isEnabled = false
             send.text = "发送中…"
@@ -678,16 +705,28 @@ class AccountController(private val activity: Activity, private val play: (Cloud
             task(
                 { fresh.send(number) },
                 { sent ->
+                    if (!phoneDialog.isShowing || dialog !== phoneDialog) return@task
+                    requestInFlight = false
+                    phoneDialog.getButton(AlertDialog.BUTTON_POSITIVE)?.isEnabled = true
                     login = fresh
                     hint.text = "验证码已发送至 ${sent.maskedMobile}"
                     startCountdown(sent.retrySeconds)
                 },
                 { failure ->
+                    if (!phoneDialog.isShowing || dialog !== phoneDialog) return@task
+                    requestInFlight = false
                     send.isEnabled = true
                     send.text = "获取验证码"
                     hint.text = safeError(failure)
+                    if (failure is PhoneLogin.Failure && failure.retrySeconds > 0)
+                        startCountdown(failure.retrySeconds)
                 },
             )
+        }
+        phoneRetryGate.remainingSeconds().takeIf { it > 0 }?.let {
+            hint.text = "平台操作频率限制仍在冷却中，请稍后手动重试，或返回账号页改用扫码登录。"
+            phoneDialog.getButton(AlertDialog.BUTTON_POSITIVE)?.isEnabled = false
+            startCountdown(it)
         }
     }
 
@@ -841,7 +880,7 @@ class AccountController(private val activity: Activity, private val play: (Cloud
         return next to account
     }
 
-    private fun acceptAccount(next: AccountCredentials, account: CloudProfile) {
+    private fun acceptAccount(next: AccountCredentials, account: CloudProfile, showResult: Boolean = true) {
         accountRestored = true
         accountRestoreFailed = false
         credentials = next
@@ -852,6 +891,7 @@ class AccountController(private val activity: Activity, private val play: (Cloud
         unconfirmedFavorites.clear()
         reservations = emptyMap()
         acceptedReservations.clear()
+        pendingReservations.clear()
         generation++
         status = "已登录，正在读取云端记录"
         lastUpload = 0
@@ -861,7 +901,19 @@ class AccountController(private val activity: Activity, private val play: (Cloud
         draining = false
         changed()
         toast("已登录 ${account.nickname}")
-        refresh(true)
+        refresh(showResult)
+    }
+
+    /** Called on the main thread; credentials never travel back to the phone. */
+    internal fun acceptConsoleLogin(web: AccountCredentials, expectedScope: Int) {
+        check(expectedScope == historyScope && !busy && !closed) { "账户状态已变化，请重新登录" }
+        status = "正在同步手机登录…"
+        changed()
+        task(
+            { validateAccount(web).also { store.save(it.first) } },
+            { acceptAccount(it.first, it.second, false) },
+            { status = "账户同步失败，请重新登录"; changed() },
+        )
     }
 
     private fun qrLogin() {
@@ -1018,7 +1070,7 @@ class AccountController(private val activity: Activity, private val play: (Cloud
         }
     }
 
-    private fun refresh(showResult: Boolean) {
+    private fun refresh(showResult: Boolean, after: (() -> Unit)? = null, failed: (() -> Unit)? = null) {
         val account = credentials ?: return
         if (busy || closed) return
         status = "正在读取账号观看历史…"
@@ -1031,24 +1083,34 @@ class AccountController(private val activity: Activity, private val play: (Cloud
                     rows.distinctBy { it.series.id }.sortedByDescending { it.updatedAt }.take(50)
                 status = "已读取 ${rows.size} 部云端观看记录"
                 changed()
-                if (showResult) {
-                    toast(status)
-                    show()
-                }
+                if (after != null) after()
+                else if (showResult) { toast(status); show() }
             },
             {
                 changed()
-                toast(safeError(it))
+                if (failed != null) failed() else toast(safeError(it))
             },
         )
         changed()
     }
 
     private fun showHistory() {
-        if (history.isEmpty()) {
-            toast("暂无已读取的云端记录，请先刷新")
+        if (!historyLoaded) {
+            val expected = generation
+            showDialog(AlertDialog.Builder(activity).setTitle("云端继续观看")
+                .setMessage("正在读取观看记录…").setNegativeButton("取消", null))
+            val loading = dialog
+            refresh(false, after = {
+                if (generation == expected && dialog === loading && loading?.isShowing == true) showHistory()
+            }, failed = {
+                if (generation == expected && dialog === loading && loading?.isShowing == true)
+                    showDialog(AlertDialog.Builder(activity).setTitle("云端继续观看")
+                        .setMessage("暂时无法读取观看记录")
+                        .setPositiveButton("重试") { _, _ -> showHistory() }.setNegativeButton("关闭", null))
+            })
             return
         }
+        if (history.isEmpty()) { toast("暂无观看记录"); dialog?.dismiss(); return }
         val snapshot = history
         showDialog(
             AlertDialog.Builder(activity)
@@ -1079,6 +1141,7 @@ class AccountController(private val activity: Activity, private val play: (Cloud
         unconfirmedFavorites.clear()
         reservations = emptyMap()
         acceptedReservations.clear()
+        pendingReservations.clear()
         pending = null
         lastProgress = null
         draining = false

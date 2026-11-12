@@ -29,6 +29,7 @@ import androidx.media3.ui.PlayerView
 import com.hongguotv.core.*
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import org.json.JSONObject
 import kotlin.math.roundToInt
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
@@ -41,6 +42,104 @@ class MainActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newFixedThreadPool(3)
     private val repository = ContentRepository(playbackSession = PlaybackDeviceSession.shared)
+    private val phoneCatalog by lazy {
+        PhoneControlCatalog(library, cloudAccount) { series, progress ->
+            // Save while the old detail still identifies the playing episode.
+            saveProgress()
+            library.flush()
+            releasePlayer()
+            tvTools.close()
+            openDetail(series, resume = true, cloudProgress = progress, fromPhone = true)
+        }
+    }
+    private val phoneConsole by lazy {
+        PhoneConsole(this, tvTools, phoneCatalog, ::phoneControl) { keyword, requestedPage, result ->
+            saveProgress()
+            releasePlayer()
+            library.rememberSearch(keyword, ContentType.SHORT)
+            searchDraft = keyword
+            query = keyword
+            submittedSearch = keyword
+            collection = null
+            tab = 7
+            page = requestedPage
+            catalog = result.items
+            hasMore = result.hasMore
+            catalogFocus = ""
+            showCatalog(false)
+        }
+    }
+
+    private fun phoneControl(body: JSONObject): JSONObject {
+        val action = body.getString("action")
+        val active = screen == "player" && detail != null
+        if (action == "status") return JSONObject()
+            .put("active", active).put("title", if (active) detail?.series?.title.orEmpty() else "")
+            .put("episode", if (active) episodeIndex + 1 else 0)
+            .put("episodes", if (active) detail?.episodes?.size ?: 0 else 0)
+            .put("position", if (active) currentPosition() else 0)
+            .put("duration", if (active) player?.duration?.coerceAtLeast(0) ?: 0 else 0)
+            .put("playing", active && player?.isPlaying == true)
+            .put("speed", library.playbackSpeed).put("quality", library.maxQuality)
+            .put("scope", cloudAccount.historyScope).put("account", cloudAccount.accountLabel)
+            .put("signedIn", cloudAccount.signedIn).put("accountStatus", cloudAccount.status)
+            .put("message", phoneCatalog.message).put("reservation", phoneCatalog.reservationStatus())
+            .put("catalogRevision", phoneCatalog.revision).put("favorite", phoneCatalog.favoriteStatus())
+        if (action == "account") {
+            tvTools.close()
+            cloudAccount.show()
+            return JSONObject().put("message", "请在电视完成账户操作")
+        }
+        if (action == "key") {
+            val key = when (body.getString("value")) {
+                "up" -> KeyEvent.KEYCODE_DPAD_UP
+                "down" -> KeyEvent.KEYCODE_DPAD_DOWN
+                "left" -> KeyEvent.KEYCODE_DPAD_LEFT
+                "right" -> KeyEvent.KEYCODE_DPAD_RIGHT
+                "ok" -> KeyEvent.KEYCODE_DPAD_CENTER
+                "back" -> KeyEvent.KEYCODE_BACK
+                else -> throw IllegalArgumentException("Unknown key")
+            }
+            for (event in listOf(KeyEvent(KeyEvent.ACTION_DOWN, key), KeyEvent(KeyEvent.ACTION_UP, key))) {
+                if (!tvTools.dispatchPhoneKey(event) && !cloudAccount.dispatchPhoneKey(event) &&
+                    episodePanel?.dispatchPhoneKey(event) != true) dispatchKeyEvent(event)
+            }
+            return JSONObject().put("message", "已发送遥控指令")
+        }
+        if (!active) return JSONObject().put("error", "请先选择剧目并在电视播放；首页可使用方向遥控")
+        when (action) {
+            "pause" -> requestPlayback(false)
+            "resume" -> requestPlayback(true)
+            "previous" -> skipEpisode(-1)
+            "next" -> skipEpisode(1)
+            "backward", "forward" -> {
+                if (!playbackReady) return JSONObject().put("error", "播放器尚未准备完成")
+                seekTo(currentPosition() + if (action == "forward") 15000 else -15000)
+            }
+            "episode" -> {
+                val index = body.getInt("value") - 1
+                require(index in detail!!.episodes.indices)
+                playEpisode(index)
+            }
+            "speed" -> {
+                val speed = body.getDouble("value").toFloat()
+                require(speed in PlaybackSpeed.options)
+                library.playbackSpeed = speed
+                player?.setPlaybackSpeed(speed)
+            }
+            "quality" -> {
+                val quality = body.getInt("value")
+                require(quality in PlaybackQuality.options)
+                if (library.maxQuality != quality) {
+                    library.maxQuality = quality
+                    playEpisode(episodeIndex, currentPosition(), player?.playWhenReady ?: requestedAutoplay)
+                }
+            }
+            else -> throw IllegalArgumentException("Unknown command")
+        }
+        return JSONObject().put("message", "已执行")
+    }
+
     // 榜单专用并行加载通道：最多四榜各自在途、互不取消，与全局单飞 work() 隔离。
     private val rankWorker = Executors.newFixedThreadPool(3)
     private val networkCleanup = Executors.newSingleThreadExecutor()
@@ -137,6 +236,7 @@ class MainActivity : Activity() {
     private lateinit var playbackTitle: TextView
     private var homePlayback = false
     private var directPlayback = false
+    private var phonePlayback = false
     private var collection: String? = null
     private var collectionReturn: CatalogState? = null
     private var collectionFocus = ""
@@ -170,7 +270,6 @@ class MainActivity : Activity() {
     private var searchSuggestions: SearchSuggestionsView? = null
     private var tvSearchPanel: TvSearchPanel? = null
     private var submittedSearch: String? = null
-    private var tvSearchOpen = false
     private val discoveryBrowser = DiscoveryBrowserState()
     private var discoveryScreen: DiscoveryScreen? = null
     private var rankingScreen: RankingScreen? = null
@@ -256,6 +355,7 @@ class MainActivity : Activity() {
         object : ConnectivityManager.NetworkCallback() {
             private fun changed() {
                 main.post {
+                    phoneConsole.networkChanged()
                     if (connectivity.isActiveNetworkMetered || !networkAvailable()) cancelPrefetch()
                     if (foreground && screen == "player" && playError && autoRecovery)
                         scheduleRecovery()
@@ -306,8 +406,6 @@ class MainActivity : Activity() {
     private val settingsPositions = IntArray(4)
     private var settingsSidebar = emptyList<View>()
     private var settingsRows = emptyList<View>()
-    private lateinit var librarySources: LibrarySources
-    private val sourceButtons = mutableListOf<View>()
     private var page = 1
     private var query = ""
     private var catalog = emptyList<Series>()
@@ -494,7 +592,6 @@ class MainActivity : Activity() {
             View.SYSTEM_UI_FLAG_FULLSCREEN or
                 View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
                 View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-        librarySources = LibrarySources(this)
         library = Library(this)
         artwork = ArtworkLoader(this)
         tvTools = TvTools(this)
@@ -538,18 +635,16 @@ class MainActivity : Activity() {
             }
             if (screen == "catalog" && accountCatalog() && library.isLoaded) {
                 val focusNav = nav.any { it.hasFocus() }
-                val focusSource = sourceButtons.any { it.hasFocus() }
                 val focusManage = historyManage?.hasFocus() == true
                 showCatalog(focusNav = focusNav)
-                if (focusSource) sourceButtons.getOrNull(1)?.requestFocus()
-                else if (focusManage) historyManage?.requestFocus()
+                if (focusManage) historyManage?.requestFocus()
                 if (cloudAccount.signedIn) {
                     if (
                         tab == 5 &&
                             cloudAccount.reservationState(reservationOnline).message == "尚未读取预约记录"
                     )
                         cloudAccount.refreshReservations()
-                    if (isAccountFavorites() && cloudAccount.favoriteState().message == "尚未读取账户收藏")
+                    if (isFavorites() && cloudAccount.favoriteState().message == "尚未读取账户收藏")
                         cloudAccount.refreshFavorites()
                 }
             }
@@ -711,7 +806,6 @@ class MainActivity : Activity() {
         selectionPreview = null
         catalogScroll = null
         nav.clear()
-        sourceButtons.clear()
         typeButtons.clear()
         searchInput = null
         searchButton = null
@@ -778,8 +872,8 @@ class MainActivity : Activity() {
     // 导航按钮的点击入口：记录当前栏目状态，再切换到目标栏目。
     private fun switchTab(next: Int) {
         val keepNavigationFocus = nav.any { it.hasFocus() }
-        if (tab == 1) {
-            saveDiscoveryDraft()
+        if (tab == 7) {
+            saveSearchDraft()
             continuousCatalog?.capture()?.let { catalogFocus = it.id }
         }
         leaveCollection()
@@ -792,7 +886,8 @@ class MainActivity : Activity() {
         hasMore = saved?.hasMore ?: false
         ranking = saved?.ranking
         catalogFocus = tabFocus[next].orEmpty()
-        showCatalog(load = (next <= 2 && catalog.isEmpty()), focusNav = keepNavigationFocus)
+        showCatalog(load = ((next <= 2 || next == 7 && query.isNotBlank()) && catalog.isEmpty()), focusNav = keepNavigationFocus && next != 7)
+        if (next == 7) tvSearchPanel?.entry()?.requestFocus()
         refreshAccountSection()
     }
 
@@ -838,19 +933,16 @@ class MainActivity : Activity() {
     private fun inlineHomeFilters() =
         tab == 0 && resources.configuration.fontScale <= 1.2f && widthDp() >= 1200
 
-    private fun isAccountHistory() = tab == 4 && librarySources.accountHistory
+    private fun isHistory() = tab == 4
 
-    private fun isAccountFavorites() = tab == 3 && librarySources.accountFavorites
+    private fun isFavorites() = tab == 3
 
-    private fun isLocalHistory() = tab == 4 && !librarySources.accountHistory
-
-    private fun isLocalFavorites() = tab == 3 && !librarySources.accountFavorites
-
-    private fun accountCatalog() = isAccountHistory() || isAccountFavorites() || tab == 5
+    private fun accountCatalog() = isHistory() || isFavorites() || tab == 5
 
     private fun refreshAccountSection() {
-        if (isAccountHistory()) cloudAccount.refreshHistory()
-        if (isAccountFavorites()) {
+        if (!cloudAccount.signedIn) return
+        if (isHistory()) cloudAccount.refreshHistory()
+        if (isFavorites()) {
             cloudAccount.refreshFavorites()
             cloudAccount.refreshHistory()
         }
@@ -860,12 +952,18 @@ class MainActivity : Activity() {
         }
     }
 
-    // 卡片与焦点预览共用同一集数来源，账号片单不混入本机进度。
+    private fun mergedCloudProgress(id: String): CloudProgress? {
+        val cloud = cloudAccount.progress(id) ?: return null
+        val local = library.progress(id)
+        return cloud.takeIf { local == null || it.updatedAt > local.updatedAt }
+    }
+
+    // 合并片单的卡片、预览与续播统一使用较新的观看进度。
     private fun collectionEpisodeTotal(series: Series): Int {
-        val remote = isAccountFavorites() || isAccountHistory() || tab == 5
-        val cloud = if (remote) cloudAccount.progress(series.id) else null
-        val local = if (!remote) library.progress(series.id) else null
-        val update = if (!remote) library.favoriteUpdate(series.id) else null
+        val remote = isFavorites() || isHistory() || tab == 5
+        val cloud = if (tab == 5) cloudAccount.progress(series.id) else if (remote) mergedCloudProgress(series.id) else null
+        val local = if (tab != 5) library.progress(series.id) else null
+        val update = if (tab != 5) library.favoriteUpdate(series.id) else null
         return maxOf(
                 EpisodeSummary.total(series.badge),
                 EpisodeSummary.total(cloud?.series?.badge.orEmpty()),
@@ -882,33 +980,20 @@ class MainActivity : Activity() {
     }
 
     private fun collectionEpisodeLabel(series: Series): String {
-        val remote = isAccountFavorites() || isAccountHistory() || tab == 5
-        val cloud = if (remote) cloudAccount.progress(series.id) else null
-        val local = if (!remote) library.progress(series.id) else null
-        val update = if (!remote) library.favoriteUpdate(series.id) else null
+        val remote = isFavorites() || isHistory() || tab == 5
+        val cloud = if (tab == 5) cloudAccount.progress(series.id) else if (remote) mergedCloudProgress(series.id) else null
+        val local = if (tab != 5) library.progress(series.id) else null
+        val update = if (tab != 5) library.favoriteUpdate(series.id) else null
         return EpisodeSummary.label(
             collectionEpisodeTotal(series),
             cloud?.episodeIndex ?: local?.episodeIndex,
-            account = remote,
+            account = cloud != null,
             ready = cloudAccount.historyReady,
             loading = cloudAccount.historyLoading,
-            markedWatched = !remote && library.watched(series.id),
+            markedWatched = cloud == null && library.watched(series.id),
             pending = tab == 5 && !reservationOnline,
             added = update?.added ?: 0,
         )
-    }
-
-    private fun switchLibrarySource(account: Boolean) {
-        if (tab == 3) librarySources.accountFavorites = account
-        else librarySources.accountHistory = account
-        page = 1
-        catalogFocus = ""
-        catalog = emptyList()
-        tabState.remove(tab)
-        tabFocus.remove(tab)
-        showCatalog()
-        sourceButtons.getOrNull(if (account) 1 else 0)?.requestFocus()
-        refreshAccountSection()
     }
 
     private fun localCatalog() = tab in 3..5 || collection != null
@@ -923,11 +1008,12 @@ class MainActivity : Activity() {
                 library.history().filterNot { library.watched(it.series.id) }.map { it.series }
             else ->
                 when {
-                    isAccountFavorites() -> cloudAccount.favoriteState().rows.map { it.series }
-                    isAccountHistory() -> cloudAccount.historyRows().map { it.series }
+                isFavorites() -> (library.favorites() + cloudAccount.favoriteState().rows.map { it.series }).distinctBy { it.id }
+                isHistory() -> (library.history().map { it.series to it.updatedAt } +
+                    cloudAccount.historyRows().map { it.series to it.updatedAt })
+                    .sortedByDescending { it.second }.distinctBy { it.first.id }.map { it.first }
                     tab == 5 ->
                         cloudAccount.reservationState(reservationOnline).rows.map { it.series }
-                    isLocalFavorites() -> library.favorites()
                     else -> library.history().map { it.series }
                 }
         }
@@ -1056,141 +1142,46 @@ class MainActivity : Activity() {
             return
         }
         if (tab == 1) {
-            if (tvSearchOpen || query.isNotBlank()) {
-                val panel =
-                    TvSearchPanel(
-                        this,
-                        searchDraft ?: query,
-                        library.searches().map { it.query },
-                        nav[tab],
-                        repository::searchSuggestions,
-                        ::runSearch,
-                        { anchor -> tvTools.phoneInput(anchor) { query, _ -> query?.let { runSearch(it) } } },
-                        ::returnToDiscovery,
-                    )
-                tvSearchPanel = panel
-                searchInput = panel.input
-                searchButton = panel.searchButton
-                searchSuggestions = panel.suggestions
-                panel.resultEntry = { continuousCatalog?.grid?.takeIf { catalog.isNotEmpty() } }
-                container.addView(panel, lp(-1, 0).apply { weight = 1f })
-                nav.forEach { it.nextFocusDownId = panel.entry().id }
-                if (query.isBlank()) {
-                    message(panel.results, "输入关键词后选择联想词，或按「搜索」查看剧集")
-                    if (focusNav) nav[tab].requestFocus() else panel.entry().requestFocus()
-                    return
-                }
-            } else {
-                val searchRow = row()
-                val input =
-                    EditText(this).apply {
-                        id = View.generateViewId()
-                        hint = "输入剧名、关键词或拼音"
-                        setText(searchDraft ?: query)
-                        textSize = 16f
-                        setTextColor(white)
-                        setHintTextColor(muted)
-                        isSingleLine = true
-                        maxLines = 1
-                        filters = arrayOf(android.text.InputFilter.LengthFilter(80))
-                        imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
-                    }
-                searchRow.addView(
-                    input,
-                    lp(0, dp(45)).apply {
-                        weight = 1f
-                        rightMargin = dp(10)
-                    },
-                )
-                fun search() {
-                    val next = input.text.toString().trim()
-                    if (next.isBlank()) {
-                        returnToDiscovery()
-                        return
-                    }
-                    runSearch(next)
-                }
-                searchInput = input
-                searchButton = addButton(searchRow, "搜索") { search() }
-                input.nextFocusUpId = nav[tab].id
-                searchButton?.nextFocusUpId = input.nextFocusUpId
-                lateinit var recent: TextView
-                recent = addButton(searchRow, "历史") { showSearchHistory(recent) }
-                recent.nextFocusUpId = input.nextFocusUpId
-                lateinit var phone: TextView
-                phone =
-                    addButton(searchRow, "手机输入") {
-                        (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
-                            .hideSoftInputFromWindow(input.windowToken, 0)
-                        tvTools.phoneInput(phone) { query, _ -> query?.let { runSearch(it) } }
-                    }
-                phone.nextFocusUpId = input.nextFocusUpId
-                val keyboard =
-                    addButton(searchRow, "屏幕键盘") {
-                            saveDiscoveryDraft()
-                            tvSearchOpen = true
-                            showCatalog()
-                        }
-                        .apply { nextFocusUpId = input.nextFocusUpId }
-                searchActions.addAll(listOf(recent, phone, keyboard))
-                if (query.isNotBlank())
-                    searchActions +=
-                        addButton(searchRow, "返回分类") { returnToDiscovery() }
-                            .apply { nextFocusUpId = input.nextFocusUpId }
 
-                nav.forEach { it.nextFocusDownId = input.id }
-                input.setOnEditorActionListener { _, _, _ ->
-                    search()
-                    true
-                }
-                container.addView(searchRow)
-                searchSuggestions =
-                    SearchSuggestionsView(
-                            this,
-                            input,
-                            listOfNotNull(searchButton) + searchActions,
-                            {
-                                if (query.isBlank()) discoveryScreen?.entry()
-                                else
-                                    continuousCatalog?.grid
-                                        ?: catalogBody
-                                            ?.getFocusables(View.FOCUS_DOWN)
-                                            ?.firstOrNull()
-                            },
-                            repository::searchSuggestions,
-                            ::runSearch,
-                        )
-                        .also { container.addView(it) }
-                if (query.isBlank()) {
-                    val browser =
-                        DiscoveryScreen(
-                            this,
-                            discoveryBrowser,
-                            input,
-                            ::loadCover,
-                            { openDetail(it, false) },
-                            ::quickActions,
-                            { selection, cursor, done ->
-                                work(
-                                    { repository.filteredDiscovery(selection, cursor) },
-                                    { done(it, null) },
-                                    { done(null, it) },
-                                )
-                            },
-                        )
-                    discoveryScreen = browser
-                    browser.navigationChanged = { searchSuggestions?.updateNavigation() }
-                    container.addView(browser, lp(-1, 0).apply { weight = 1f })
-                    browser.start(!focusNav)
-                    searchSuggestions?.updateNavigation()
-                    if (focusNav) nav[tab].requestFocus()
-                    return
-                }
-                container.addView(
-                    text("关键词搜索覆盖全部剧集 · 返回分类可组合筛选", 12f, muted).apply {
-                        setPadding(0, dp(6), 0, dp(5))
-                    }
+            val browser = DiscoveryScreen(
+            this, discoveryBrowser, nav[tab], ::loadCover,
+            { openDetail(it, false) }, ::quickActions,
+            { selection, cursor, done ->
+                work({ repository.filteredDiscovery(selection, cursor) },
+                    { done(it, null) }, { done(null, it) })
+            },
+            )
+            discoveryScreen = browser
+            container.addView(browser, lp(-1, 0).apply { weight = 1f })
+            nav.forEach { it.nextFocusDownId = browser.entry().id }
+            browser.navigationChanged = { nav.forEach { it.nextFocusDownId = browser.entry().id } }
+            browser.start(!focusNav)
+            if (focusNav) nav[tab].requestFocus()
+            return
+        }
+        if (tab == 7) {
+            val panel =
+                TvSearchPanel(
+                    this,
+                    searchDraft ?: query,
+                    library.searches().map { it.query },
+                    nav[tab],
+                    repository::searchSuggestions,
+                    ::runSearch,
+                    { anchor -> phoneConsole.show(anchor) },
+
                 )
+            tvSearchPanel = panel
+            searchInput = panel.input
+            searchButton = panel.searchButton
+            searchSuggestions = panel.suggestions
+            panel.resultEntry = { continuousCatalog?.grid?.takeIf { catalog.isNotEmpty() } }
+            container.addView(panel, lp(-1, 0).apply { weight = 1f })
+            nav.forEach { it.nextFocusDownId = panel.entry().id }
+            if (query.isBlank()) {
+                message(panel.results, "输入关键词后选择联想词，或按「搜索」查看剧集")
+                panel.entry().requestFocus()
+                return
             }
         } else if (tab > 2) {
             val heading = row().apply { setPadding(0, dp(4), 0, dp(4)) }
@@ -1206,11 +1197,11 @@ class MainActivity : Activity() {
                     .apply { setTypeface(null, Typeface.BOLD) },
                 lp(0, -2).apply { weight = 1f },
             )
-            if (isLocalFavorites())
+            if (isFavorites())
                 favoriteCheck =
                     addButton(heading, "检查更新") { favoriteMonitor.check(force = true) }
                         .apply { nextFocusUpId = nav[tab].id }
-            if (isLocalHistory() && library.history().isNotEmpty()) {
+            if (isHistory() && library.history().isNotEmpty()) {
                 historyManage =
                     addButton(heading, "管理本机记录") {
                             val rows = library.history()
@@ -1241,8 +1232,8 @@ class MainActivity : Activity() {
                             if (!cloudAccount.signedIn) "登录红果"
                             else
                                 when {
-                                    isAccountFavorites() -> "刷新收藏"
-                                    isAccountHistory() -> "刷新历史"
+                                    isFavorites() -> "刷新收藏"
+                                    isHistory() -> "刷新历史"
                                     else -> "刷新预约"
                                 },
                         ) {
@@ -1255,58 +1246,10 @@ class MainActivity : Activity() {
             }
             container.addView(heading)
             if (tab == 3 || tab == 4) {
-                val sources = row().apply { setPadding(0, dp(2), 0, dp(4)) }
-                val account =
-                    if (tab == 3) librarySources.accountFavorites else librarySources.accountHistory
-                listOf(false, true).forEach { remote ->
-                    sourceButtons +=
-                        addButton(
-                                sources,
-                                if (tab == 3) if (remote) "账户收藏" else "本机收藏"
-                                else if (remote) "账户历史" else "本机历史",
-                                account == remote,
-                            ) {
-                                if (account != remote) switchLibrarySource(remote)
-                            }
-                            .apply {
-                                nextFocusUpId =
-                                    historyManage?.id ?: favoriteCheck?.id ?: nav[tab].id
-                            }
-                }
-                sourceButtons.forEach { it.nextFocusDownId = it.id }
-                sourceButtons[0].nextFocusLeftId = sourceButtons[0].id
-                sourceButtons[0].nextFocusRightId = sourceButtons[1].id
-                sourceButtons[1].nextFocusLeftId = sourceButtons[0].id
-                sourceButtons[1].nextFocusRightId = sourceButtons[1].id
-                val note =
-                    when {
-                        isAccountFavorites() ->
-                            "${cloudAccount.accountLabel} · ${cloudAccount.favoriteState().message}\n与手机红果同步；长按剧集可管理账户收藏"
-                        isAccountHistory() ->
-                            "${cloudAccount.accountLabel} · ${cloudAccount.historyStatus}\n显示当前账号最近 50 部云端记录，续播使用账号进度"
-                        isLocalHistory() -> "只保存在这台电视，管理和清空不影响账户历史"
-                        else -> "只保存在这台电视，不自动上传或合并到账户收藏"
-                    }
-                val notes = column().apply { setPadding(dp(10), 0, 0, 0) }
-                notes.addView(
-                    text(note, 12f, muted).apply {
-                        maxLines = 2
-                        ellipsize = TextUtils.TruncateAt.END
-                    }
-                )
-                if (isLocalFavorites()) {
-                    favoriteStatus =
-                        text(favoriteMonitor.status, 12f, muted).apply {
-                            maxLines = 1
-                            ellipsize = TextUtils.TruncateAt.END
-                        }
-                    notes.addView(favoriteStatus)
-                }
-                sources.addView(notes, lp(0, -2).apply { weight = 1f })
-                container.addView(sources)
-                nav.forEach { it.nextFocusDownId = sourceButtons[if (account) 1 else 0].id }
-                favoriteCheck?.nextFocusDownId = sourceButtons[if (account) 1 else 0].id
-                historyManage?.nextFocusDownId = sourceButtons[if (account) 1 else 0].id
+                val note = if (!cloudAccount.signedIn) "本机记录 · 登录后在这里合并显示账户记录"
+                    else if (tab == 3) "本机与账户收藏已合并 · 相同剧集只显示一次 · ${cloudAccount.favoriteState().message}"
+                    else "本机与账户历史已合并 · 按最近观看排序 · ${cloudAccount.historyStatus}"
+                container.addView(text(note, 12f, muted).apply { maxLines = 2 })
             }
             if (tab == 5) {
                 val state = cloudAccount.reservationState(reservationOnline)
@@ -1481,8 +1424,8 @@ class MainActivity : Activity() {
             typeButtons.values.forEach { it.nextFocusDownId = collectionBack!!.id }
         }
         catalogPageKey =
-            "$tab:${collection.orEmpty()}:$page:$query:${if(accountCatalog()) cloudAccount.historyScope else 0}:$reservationOnline:${if(tab==3) librarySources.accountFavorites else if(tab==4) librarySources.accountHistory else false}"
-        if (tab == 1 && collection == null) {
+            "$tab:${collection.orEmpty()}:$page:$query:${if(accountCatalog()) cloudAccount.historyScope else 0}:$reservationOnline"
+        if (tab == 7 && collection == null) {
             renderContinuousDiscovery(body, focusNav, focusType)
             return
         }
@@ -1507,18 +1450,16 @@ class MainActivity : Activity() {
             val empty =
                 when {
                     tab == 1 -> if (query.isBlank()) "该分类暂无剧集，可切换题材或输入关键词搜索" else "没有找到相关剧集，换个关键词试试"
-                    isAccountFavorites() ->
-                        if (!cloudAccount.signedIn) "登录红果后查看账户收藏，本机收藏仍可使用"
+                    isFavorites() ->
+                        if (!cloudAccount.signedIn) "暂无收藏，可在剧集详情中收藏，或登录后合并显示账户收藏"
                         else if (cloudAccount.favoriteState().loading) "正在读取账户收藏…"
                         else if (!cloudAccount.favoriteState().loaded) "账户收藏读取失败，请按上方刷新重试"
-                        else "暂无已读取的账户收藏，可在手机收藏后刷新"
-                    isLocalFavorites() -> "在剧集详情中加入本机收藏，喜欢的剧就会出现在这里"
-                    isAccountHistory() ->
-                        if (!cloudAccount.signedIn) "登录红果后查看账户历史，本机历史仍可使用"
+                        else "暂无收藏，可在剧集详情中收藏，或在手机收藏后刷新"
+                    isHistory() ->
+                        if (!cloudAccount.signedIn) "暂无观看历史，播放后会自动记录；登录后可合并显示账户历史"
                         else if (cloudAccount.historyLoading) "正在读取账户观看历史…"
                         else if (!cloudAccount.historyReady) "账户历史读取失败，请按上方刷新重试"
-                        else "当前账号暂无云端观看记录"
-                    isLocalHistory() -> "在这台电视播放过的剧集会自动保存在这里"
+                        else "暂无观看历史，播放后会自动记录"
                     tab == 5 ->
                         if (!cloudAccount.signedIn) "登录红果账号后，在这里同步手机预约"
                         else if (cloudAccount.reservationState(reservationOnline).loading)
@@ -1530,7 +1471,7 @@ class MainActivity : Activity() {
                 }
             preview.visibility = View.GONE
             message(list, if (loading) "正在加载推荐…" else empty)
-            if (!loading && (isLocalHistory() || isLocalFavorites())) {
+            if (!loading && (isHistory() || isFavorites())) {
                 addButton(list, "去首页看看") { switchTab(0) }
             }
             if ((tab <= 2 || localCatalog()) && page > 1)
@@ -1549,9 +1490,6 @@ class MainActivity : Activity() {
             }
             if (focusType) typeButtons[library.contentType]?.requestFocus()
             else if (collectionBack != null && !focusNav) collectionBack?.requestFocus()
-            else if (sourceButtons.isNotEmpty() && !focusNav)
-                sourceButtons[if (isAccountHistory() || isAccountFavorites()) 1 else 0]
-                    .requestFocus()
             else if (focusNav || resumeCards.isEmpty()) nav[tab].requestFocus()
             else resumeCards.first().requestFocus()
             return
@@ -1611,7 +1549,7 @@ class MainActivity : Activity() {
                     },
                     lp(-1, -2).apply { weight = 1f },
                 )
-                val cloud = if (isAccountHistory()) cloudAccount.progress(item.id) else null
+                val cloud = if (isHistory()) mergedCloudProgress(item.id) else null
                 val progress =
                     cloud?.let {
                         WatchProgress(
@@ -1624,7 +1562,7 @@ class MainActivity : Activity() {
                             it.updatedAt,
                         )
                     }
-                        ?: if (isLocalHistory() || collection == "resume") library.progress(item.id)
+                        ?: if (isHistory() || collection == "resume") library.progress(item.id)
                         else null
                 val summary =
                     when {
@@ -1637,7 +1575,7 @@ class MainActivity : Activity() {
                         else -> item.badge
                     }
                 val badge =
-                    text(summary, 12f, if (tab == 2 || isLocalFavorites()) accent else muted)
+                    text(summary, 12f, if (tab == 2 || isFavorites()) accent else muted)
                         .apply {
                             maxLines = if (tab == 5) 3 else if (tab == 3 || tab == 4) 2 else 1
                             minLines = maxLines
@@ -1647,18 +1585,17 @@ class MainActivity : Activity() {
                             setPadding(dp(3), 0, 0, 0)
                         }
                 card.addView(badge, lp(-1, -2))
-                if (isLocalFavorites()) favoriteBadges[item.id] = badge
+                if (isFavorites()) favoriteBadges[item.id] = badge
                 card.setOnClickListener {
                     if (reservationNotice(item, card)) return@setOnClickListener
                     catalogFocus = item.id
                     openDetail(
                         item,
-                        isLocalHistory() ||
-                            isAccountHistory() ||
+                        isHistory() ||
                             collection == "resume" ||
                             collection == "updates",
                         cloudProgress =
-                            if (isAccountHistory()) cloudAccount.progress(item.id) else null,
+                            if (isHistory()) mergedCloudProgress(item.id) else null,
                     )
                 }
                 card.setOnLongClickListener {
@@ -1769,9 +1706,6 @@ class MainActivity : Activity() {
             card.nextFocusUpId =
                 if (index < count)
                     (searchInput?.id
-                        ?: sourceButtons
-                            .getOrNull(if (isAccountHistory() || isAccountFavorites()) 1 else 0)
-                            ?.id
                         ?: collectionBack?.id
                         ?: reservationFilters.getOrNull(if (reservationOnline) 0 else 1)?.id
                         ?: typeButtons[library.contentType]?.id
@@ -1824,13 +1758,6 @@ class MainActivity : Activity() {
                     ?: resumeCards.firstOrNull()?.id
                     ?: homeUpdates?.id
                     ?: cards.first().id
-        }
-        if (sourceButtons.isNotEmpty()) {
-            val selected = sourceButtons[if (isAccountHistory() || isAccountFavorites()) 1 else 0]
-            nav.forEach { it.nextFocusDownId = selected.id }
-            sourceButtons.forEach { it.nextFocusDownId = cards.first().id }
-            favoriteCheck?.nextFocusDownId = selected.id
-            historyManage?.nextFocusDownId = selected.id
         }
         searchInput?.nextFocusDownId = cards.first().id
         searchButton?.nextFocusDownId = cards[minOf(4, cards.lastIndex)].id
@@ -1983,7 +1910,7 @@ class MainActivity : Activity() {
                                 val accountScope = cloudAccount.historyScope
                                 cloudAccount.reserve(chosen) { message ->
                                     if (stillCurrent() && accountScope == cloudAccount.historyScope)
-                                        tvTools.info("预约状态", message, anchor)
+                                        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
                                 }
                             }
                         },
@@ -2015,9 +1942,8 @@ class MainActivity : Activity() {
                 .firstOrNull { it.series.id == series.id }
                 ?.let(::reservationDescription)
                 .orEmpty()
-        if (isAccountHistory())
-            return cloudAccount
-                .progress(series.id)
+        if (isHistory() && mergedCloudProgress(series.id) != null)
+            return mergedCloudProgress(series.id)
                 ?.let { "账号进度 · 第 ${it.episodeIndex+1} 集 · ${formatTime(it.position)}" }
                 .orEmpty()
         val progress = library.progress(series.id)
@@ -2207,7 +2133,7 @@ class MainActivity : Activity() {
         actions +=
             (if (
                 library.progress(series.id) != null ||
-                    isAccountHistory() && cloudAccount.progress(series.id) != null
+                    isHistory() && cloudAccount.progress(series.id) != null
             )
                 "继续观看"
             else "直接播放") to
@@ -2216,7 +2142,7 @@ class MainActivity : Activity() {
                         series,
                         true,
                         cloudProgress =
-                            if (isAccountHistory()) cloudAccount.progress(series.id) else null,
+                            if (isHistory()) mergedCloudProgress(series.id) else null,
                     )
                 }
         actions += "查看剧集详情" to { openDetail(series) }
@@ -2230,12 +2156,12 @@ class MainActivity : Activity() {
                         .show()
                     refreshLibraryCards(
                         series.id,
-                        !added && (isLocalFavorites() || collection == "updates"),
+                        !added && (isFavorites() || collection == "updates"),
                     )
                     if (added) favoriteMonitor.check()
                 }
         actions += "查看完整标题" to { tvTools.info("完整标题", series.title, anchor) }
-        if (isLocalHistory()) actions += "管理观看记录" to { manageHistory(series, anchor) }
+        if (isHistory() && library.progress(series.id) != null) actions += "管理本机观看记录" to { manageHistory(series, anchor) }
         tvTools.choose(
             series.title,
             actions.map { it.first },
@@ -2254,22 +2180,17 @@ class MainActivity : Activity() {
             Toast.makeText(this, "账户收藏正在处理，请稍候", Toast.LENGTH_SHORT).show()
             return
         }
-        if (cloudAccount.favoriteNeedsRefresh(series.id)) {
-            cloudAccount.refreshFavorites()
-            return
-        }
-        val add = !cloudAccount.accountFavorite(series.id)
+        val pending = cloudAccount.favoriteNeedsRefresh(series.id)
+        val add = cloudAccount.favoriteTarget(series.id)
         val scope = cloudAccount.historyScope
-        tvTools.confirm(
-            if (add) "加入账户收藏" else "取消账户收藏",
-            "${if(add) "将《${series.title}》加入" else "将《${series.title}》从"}${cloudAccount.accountLabel}的红果收藏${if(add) "，手机端也会同步显示" else "中移除"}。本机收藏保持独立。",
-            anchor,
-        ) {
-            if (scope != cloudAccount.historyScope || !cloudAccount.signedIn) return@confirm
-            cloudAccount.changeFavorite(series, add) { message ->
-                tvTools.info("账户收藏", message, anchor)
-            }
+        val apply = {
+            if (scope == cloudAccount.historyScope && cloudAccount.signedIn)
+                cloudAccount.changeFavorite(series, add) { message ->
+                    Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+                }
         }
+        if (add || pending) apply()
+        else tvTools.confirm("取消账户收藏", "将《${series.title}》从账户收藏中移除？", anchor, apply)
     }
 
     private fun refreshFavoriteLabels() {
@@ -2415,7 +2336,7 @@ class MainActivity : Activity() {
                     toggle("跨季自动连播（需开启自动连播）", library.seasonAutoplay) { library.seasonAutoplay = it }
                 }
                 1 -> {
-                    val labels = listOf("首页", "找剧", "排行榜", "收藏", "观看历史", "账户预约", "设置")
+                    val labels = listOf("首页", "找剧", "排行榜", "收藏", "观看历史", "账户预约", "设置", "搜索")
                     lateinit var startup: TextView
                     startup = setting("启动页面  ·  ${labels[library.startupPage]}") {
                         tvTools.choose("启动页面", labels, startup, { choice ->
@@ -2439,6 +2360,7 @@ class MainActivity : Activity() {
                         setPadding(0, 0, 0, dp(14))
                     })
                     setting("登录与账户管理") { cloudAccount.show() }
+                    setting("手机控制台 · 搜索 / 遥控 / 账户片单") { phoneConsole.show(null) }
                 }
                 3 -> {
                     lateinit var updates: TextView
@@ -2479,14 +2401,13 @@ class MainActivity : Activity() {
         settingsRows.getOrNull(settingsPositions[settingsGroup].coerceAtMost(settingsRows.lastIndex))?.requestFocus()
     }
 
-    private fun saveDiscoveryDraft() {
+    private fun saveSearchDraft() {
         (searchInput as? EditText)?.let { searchDraft = it.text.toString() }
     }
 
-    private fun returnToDiscovery() {
+    private fun clearSearch() {
         query = ""
         searchDraft = ""
-        tvSearchOpen = false
         page = 1
         catalog = emptyList()
         hasMore = false
@@ -2500,7 +2421,7 @@ class MainActivity : Activity() {
     private fun runSearch(value: String) {
         val clean = value.trim().take(80)
         if (clean.isEmpty()) {
-            returnToDiscovery()
+            clearSearch()
             return
         }
         (searchInput as? EditText)?.let {
@@ -2508,11 +2429,10 @@ class MainActivity : Activity() {
                 .hideSoftInputFromWindow(it.windowToken, 0)
         }
         library.rememberSearch(clean, ContentType.SHORT)
-        tvSearchOpen = true
         searchDraft = clean
         query = clean
         submittedSearch = clean
-        tab = 1
+        tab = 7
         page = 1
         catalogFocus = ""
         showCatalog(true)
@@ -2566,6 +2486,7 @@ class MainActivity : Activity() {
         cloudProgress: CloudProgress? = null,
         fromRelated: Boolean = false,
         fromHome: Boolean = false,
+        fromPhone: Boolean = false,
     ) {
         if (!fromRelated) detailTrail.clear()
         relatedSection = null
@@ -2579,6 +2500,7 @@ class MainActivity : Activity() {
         releaseCatalogViews()
         screen = "detail"
         homePlayback = fromHome
+        phonePlayback = fromPhone
         directPlayback = resume && !fromHome
         detail = null
         synopsisExpanded = false
@@ -2618,7 +2540,7 @@ class MainActivity : Activity() {
                 error(body, problem) {
                     if (cloudProgress != null && accountScope != cloudAccount.historyScope)
                         showCatalog()
-                    else openDetail(series, resume, detailAutoplay, cloudProgress, fromRelated, fromHome)
+                    else openDetail(series, resume, detailAutoplay, cloudProgress, fromRelated, fromHome, fromPhone)
                 }
             },
         )
@@ -2798,9 +2720,7 @@ class MainActivity : Activity() {
         jump =
             addButton(groupRow, "跳转集数") {
                 tvTools.episodePicker(data.episodes.size, episodeIndex, jump) { target ->
-                    episodeIndex = target
-                    group = target / 20
-                    showDetail(true)
+                    playEpisode(target)
                 }
             }
         content.addView(groupRow)
@@ -2916,23 +2836,14 @@ class MainActivity : Activity() {
                 { related, anchor ->
                     if (related.upcoming) {
                         if (!cloudAccount.signedIn) cloudAccount.show()
-                        else
-                            tvTools.choose(
-                                related.series.title,
-                                listOf(cloudAccount.reservationLabel(related)),
-                                anchor,
-                                { _ ->
-                                    val scope = cloudAccount.historyScope
-                                    cloudAccount.reserve(related) { message ->
-                                        if (
-                                            screen == "detail" &&
-                                                detail?.series?.id == data.series.id &&
-                                                scope == cloudAccount.historyScope
-                                        )
-                                            tvTools.info("预约状态", message, anchor)
-                                    }
-                                },
-                            )
+                        else {
+                            val scope = cloudAccount.historyScope
+                            cloudAccount.reserve(related) { message ->
+                                if (screen == "detail" && detail?.series?.id == data.series.id &&
+                                    scope == cloudAccount.historyScope)
+                                    Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+                            }
+                        }
                     } else {
                         if (detailTrail.size >= 10) detailTrail.removeFirst()
                         detailTrail.addLast(
@@ -4858,9 +4769,10 @@ class MainActivity : Activity() {
         library.flush()
         invalidatePage()
         releasePlayer()
-        if (directPlayback && !forceDetail) showCatalog()
+        if (directPlayback && !forceDetail && !phonePlayback) showCatalog()
         else {
             directPlayback = false
+            phonePlayback = false
             showDetail(true)
         }
     }
@@ -4875,11 +4787,11 @@ class MainActivity : Activity() {
             if (settingsSidebar.any { it.hasFocus() }) { nav[6].requestFocus(); return }
         }
         if (screen == "catalog" && tab == 0 && homeFeed?.back() == true) return
-        if (screen == "catalog" && tab == 1 && tvSearchPanel != null) {
-            returnToDiscovery()
+        if (screen == "catalog" && tab == 7 && tvSearchPanel != null && !nav[7].hasFocus()) {
+            nav[7].requestFocus()
             return
         }
-        if (screen == "catalog" && tab == 1 && query.isBlank() && !nav[1].hasFocus()) {
+        if (screen == "catalog" && tab == 1 && !nav[1].hasFocus()) {
             discoveryScreen?.backToTop()
             nav[1].requestFocus()
             return
@@ -4891,7 +4803,7 @@ class MainActivity : Activity() {
         }
         when (screen) {
             "player" ->
-                if (homePlayback) returnToDetail(forceDetail = true)
+                if (homePlayback || phonePlayback) returnToDetail(forceDetail = true)
                 else if (waitingForFirstFrame) returnToDetail()
                 else if (hud.visibility == View.VISIBLE && !playError) hidePlaybackOverlay()
                 else returnToDetail()
@@ -4908,7 +4820,7 @@ class MainActivity : Activity() {
                 }
             }
             else ->
-                if (tab == 1 && query.isNotBlank()) returnToDiscovery()
+                if (tab == 7 && query.isNotBlank()) clearSearch()
                 else if (collection != null) {
                     leaveCollection()
                     showCatalog()
@@ -5012,6 +4924,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        phoneConsole.resume()
         foreground = true
         startGradualPreloading()
         gradualPreloader?.resume()
@@ -5044,6 +4957,7 @@ class MainActivity : Activity() {
                                         directPlayback,
                                         autoplay = false,
                                         cloudProgress = cloud.takeIf { directPlayback },
+                                        fromPhone = phonePlayback,
                                     )
                                 }
                             } ?: showCatalog()
@@ -5052,7 +4966,7 @@ class MainActivity : Activity() {
                             load =
                                 !localCatalog() &&
                                     catalog.isEmpty() &&
-                                    (tab == 0 || tab == 2 || tab == 1)
+                                    (tab == 0 || tab == 2 || tab == 7 && query.isNotBlank())
                         )
                 }
             } else {
@@ -5092,6 +5006,7 @@ class MainActivity : Activity() {
 
     // 应用离开前台时暂停播放及后台活动，防止页面不可见时继续消耗资源。
     override fun onStop() {
+        phoneConsole.stop()
         homeFeed?.close()
         homeFeed = null
         restoreStoppedPage = true
@@ -5117,6 +5032,7 @@ class MainActivity : Activity() {
 
     // 页面销毁时释放播放器、请求和工作线程，避免资源继续持有旧 Activity。
     override fun onDestroy() {
+        phoneConsole.stop()
         gradualPreloader?.close()
         generation++
         cancelWork()

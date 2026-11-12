@@ -22,29 +22,34 @@ internal class CatalogShell(context: Context, private val selectTab: (Int) -> Un
         setPadding(dp(24), dp(16), dp(24), dp(16))
         val header = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
         val brand = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
-        brand.addView(ImageView(context).apply { setImageResource(R.drawable.app_icon) },
-            LayoutParams(dp(28), dp(28)).apply { rightMargin = dp(9) })
+        brand.addView(ImageView(context).apply { setImageResource(R.drawable.brand_mark); contentDescription = "红果 TV 像素小电视"; scaleType = ImageView.ScaleType.FIT_CENTER },
+            LayoutParams(dp(48), dp(42)).apply { rightMargin = dp(9) })
         brand.addView(TextView(context).apply {
             text = "红果 TV"; textSize = if (widthDp < 800) 17f else 22f
             setTextColor(TvVisual.primary); typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         })
-        header.addView(brand, LayoutParams(dp(if (widthDp < 800) 105 else 140), dp(44)))
-        listOf("首页", "找剧", "排行榜", "收藏", "观看历史", "账户预约", "设置").forEachIndexed { index, title ->
+        header.addView(brand, LayoutParams(dp(if (widthDp < 800) 130 else 160), dp(44)))
+        listOf("首页", "找剧", "排行榜", "收藏", "观看历史", "账户预约", "设置", "搜索").forEachIndexed { index, title ->
             val tab = TextView(context).apply {
                 id = View.generateViewId(); text = title
-                textSize = if (widthDp < 1000) 13f else 15f
+                textSize = if (widthDp < 800) 11f else if (widthDp < 1000) 13f else 15f
                 gravity = Gravity.CENTER; isFocusable = true; isFocusableInTouchMode = true
                 isClickable = true; maxLines = 1
-                setPadding(dp(9), dp(10), dp(9), dp(10))
+                val horizontalPadding = dp(if (widthDp < 800) 4 else 9)
+                setPadding(horizontalPadding, dp(10), horizontalPadding, dp(10))
                 setOnClickListener { if (index != selected) selectTab(index) }
                 setOnFocusChangeListener { _, _ -> paint(index) }
             }
             navigation += tab
             header.addView(tab, LayoutParams(0, dp(44), 1f))
         }
-        navigation.forEachIndexed { index, view ->
-            view.nextFocusLeftId = navigation.getOrNull(index - 1)?.id ?: view.id
-            view.nextFocusRightId = navigation.getOrNull(index + 1)?.id ?: view.id
+        // Keep persisted tab IDs stable while placing search next to discovery.
+        val ordered = listOf(0, 1, 7, 2, 3, 4, 5, 6).map { navigation[it] }
+        ordered.forEach { header.removeView(it) }
+        ordered.forEach { header.addView(it, LayoutParams(0, dp(44), 1f)) }
+        ordered.forEachIndexed { index, view ->
+            view.nextFocusLeftId = ordered.getOrNull(index - 1)?.id ?: view.id
+            view.nextFocusRightId = ordered.getOrNull(index + 1)?.id ?: view.id
             view.nextFocusUpId = view.id
         }
         addView(header)

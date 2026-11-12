@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/brand/logo-pixel.png" width="200" alt="红果 TV 像素小电视" />
+</p>
+
 # 红果 TV
 
 非官方红果短剧电视客户端。Kotlin 原生 APK，安装后联网使用，仅提供 APK 安装包。

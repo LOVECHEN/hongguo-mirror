@@ -12,7 +12,7 @@ import android.view.View
 import android.view.Window
 import android.widget.*
 
-/** A remote-accessible side panel; selecting a number is the only action that changes episodes. */
+/** A remote-accessible side panel; choosing or entering a number starts that episode. */
 class EpisodePanel(
     private val activity: Activity,
     private val count: Int,
@@ -24,6 +24,12 @@ class EpisodePanel(
     private val lastCompleted: Boolean = false,
 ) {
     private val dialog = Dialog(activity)
+    internal fun dispatchPhoneKey(event: android.view.KeyEvent): Boolean {
+        val modal = dialog.takeIf { it.isShowing } ?: return false
+        modal.dispatchKeyEvent(event)
+        return true
+    }
+
     private var group = current / 20
     private var focused = current
 
@@ -87,9 +93,7 @@ class EpisodePanel(
         jump =
             button("跳转集数") {
                 locate(focused, jump) { target ->
-                    focused = target
-                    group = target / 20
-                    render()
+                    if (target in 0 until count) select(target)
                 }
             }
         listOf(close, jump).forEach {
