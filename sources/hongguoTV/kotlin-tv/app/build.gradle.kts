@@ -5,6 +5,9 @@ plugins {
     kotlin("android")
 }
 
+val legacyAudio = providers.gradleProperty("legacyAudio").map { it.toBooleanStrict() }.getOrElse(false)
+if (!legacyAudio) layout.buildDirectory.set(file("build/platform"))
+
 val signingProperties =
     Properties().apply {
         val config = rootProject.file("keystore.properties")
@@ -21,16 +24,18 @@ android {
         applicationId = "com.hongguotv.nativeapp"
         manifestPlaceholders["appLabel"] = "hongguoTV"
         minSdk = 21
+        if (!legacyAudio) minSdk = 23
+        buildConfigField("boolean", "LEGACY_AUDIO", legacyAudio.toString())
         targetSdk = 36
-        versionCode = System.getenv("HONGGUOTV_VERSION_CODE")?.toInt() ?: 23
-        versionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "0.16.2"
+        versionCode = System.getenv("HONGGUOTV_VERSION_CODE")?.toInt() ?: 25
+        versionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "0.16.4"
     }
-    // Formal publishing always requests all three installable APKs.
+    // Publish explicit ARM installer choices plus a universal updater fallback.
     splits {
         abi {
-            isEnable = providers.gradleProperty("releaseAbis").orNull == "true"
+            isEnable = !legacyAudio
             reset()
-            include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            include("armeabi-v7a", "arm64-v8a")
             isUniversalApk = true
         }
     }
@@ -38,6 +43,8 @@ android {
     testOptions {
         unitTests.isIncludeAndroidResources = true
         unitTests.all {
+            // API 21/22 cases run in the compatibility build; the platform APK cannot install there.
+            if (!legacyAudio) it.systemProperty("robolectric.enabledSdks", (23..36).joinToString(","))
             it.systemProperty(
                 "robolectric.dependency.repo.url",
                 "https://repo.maven.apache.org/maven2",
@@ -87,7 +94,7 @@ dependencies {
     implementation("com.google.zxing:core:3.5.3")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.5")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation(project(":decoder-ffmpeg"))
+    if (legacyAudio) implementation(project(":decoder-ffmpeg"))
     implementation(project(":core")) { exclude(group = "org.json") }
     implementation("androidx.media3:media3-exoplayer:1.8.0")
     implementation("androidx.media3:media3-exoplayer-hls:1.8.0")
