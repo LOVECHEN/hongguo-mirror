@@ -24,7 +24,6 @@ import androidx.media3.common.*
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
-import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
 import com.hongguotv.core.*
 import java.util.concurrent.Executors
@@ -2393,6 +2392,8 @@ class MainActivity : Activity() {
                     qualityButton = setting("默认清晰度  ·  ${library.maxQuality}P") { showQualityPicker(qualityButton, false) }
                     lateinit var speed: TextView
                     speed = setting("默认倍速  ·  ${PlaybackSpeed.label(library.playbackSpeed)}") { showSpeedPicker(speed, false) }
+                    lateinit var danmaku: TextView
+                    danmaku = setting("弹幕设置") { social.settings(danmaku) }
                     lateinit var frame: TextView
                     frame = setting("画面模式  ·  ${library.frameMode.label}") { showFramePicker(frame, false) }
                     lateinit var rotationButton: TextView
@@ -3460,7 +3461,7 @@ class MainActivity : Activity() {
             .build()
 
     private fun episodeSource(remote: RemoteVideo, id: String) =
-        ProgressiveMediaSource.Factory { VideoDataSource(remote) }
+        playbackSourceFactory { VideoDataSource(remote) }
             .createMediaSource(
                 MediaItem.Builder()
                     .setMediaId(id)
