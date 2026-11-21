@@ -7,5 +7,5 @@
 
 ## 源码快照对应的上游 commit
 
-- `N3urda/hongguoTV` @ `478f00683f08` (2026-11-19T20:59:02+08:00)
+- `N3urda/hongguoTV` @ `c14f3efb2de6` (2026-11-21T09:34:26+08:00)
 - `waligoraamodio288-rgb/hongguo-desktop-releases` @ `d508b41bedfc` (2026-11-20T20:05:13+08:00)
