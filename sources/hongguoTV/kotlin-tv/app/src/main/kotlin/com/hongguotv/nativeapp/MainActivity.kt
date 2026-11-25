@@ -1139,7 +1139,7 @@ class MainActivity : Activity() {
                         startupCache = cloudAccount.recommendationStartupCache(),
                         recentSources = recentPlaybackSources,
                     ),
-                    Media3TrialPlayback(this, library.playbackSpeed, library.frameMode),
+                    Media3TrialPlayback(this, library.playbackSpeed, library.frameMode) { library.forceSoftwareDecoding },
                     autoPreview = library.homeAutoplay,
                     backgroundBusy = { gradualPreloader?.busy == true },
                     loadCover = ::loadCover,
@@ -2393,6 +2393,19 @@ class MainActivity : Activity() {
                     })
                     lateinit var updates: TextView
                     updates = setting("检查更新") { updater.show(updates) }
+                    lateinit var route: TextView
+                    route = setting("更新线路  ·  ${updater.updateRoute.label}") {
+                        tvTools.choose(
+                            title = "更新线路",
+                            labels = AppUpdateRoute.entries.map { it.label },
+                            anchor = route,
+                            onChoice = { index ->
+                                updater.updateRoute = AppUpdateRoute.entries[index]
+                                route.text = "更新线路  ·  ${updater.updateRoute.label}"
+                            },
+                            selected = updater.updateRoute.ordinal,
+                        )
+                    }
                 }
                 1 -> {
                     lateinit var qualityButton: TextView
@@ -2405,6 +2418,7 @@ class MainActivity : Activity() {
                     frame = setting("画面模式  ·  ${library.frameMode.label}") { showFramePicker(frame, false) }
                     lateinit var rotationButton: TextView
                     rotationButton = setting("画面旋转  ·  ${library.videoRotation}°") { showRotationPicker(rotationButton) }
+                    toggle("强制软件解码（花屏时开启，下次播放生效）", library.forceSoftwareDecoding) { library.forceSoftwareDecoding = it }
                     toggle("常驻播放进度", library.alwaysShowProgress) { library.alwaysShowProgress = it }
                     toggle("自动连播", library.autoNext) { library.autoNext = it }
                     toggle("跨季自动连播（需开启自动连播）", library.seasonAutoplay) { library.seasonAutoplay = it }
@@ -3774,8 +3788,7 @@ class MainActivity : Activity() {
                         )
                         .setTargetBufferBytes(12 * 1024 * 1024)
                         .build()
-                val renderers =
-                    playbackRenderers(this)
+                val renderers = playbackRenderers(this) { library.forceSoftwareDecoding }
                 ExoPlayer.Builder(this, renderers).setLoadControl(load).build().also {
                     player = it
                     it.addListener(bufferingIndicator)

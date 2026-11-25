@@ -232,6 +232,19 @@ class TvUsabilityTest {
                 View.MeasureSpec.makeMeasureSpec(540, View.MeasureSpec.EXACTLY))
             root.layout(0, 0, 960, 540)
             assertEquals("检查更新", (root.findFocus() as TextView).text.toString())
+            val updateRoute = texts(root).single { it.text == "更新线路  ·  自动线路" }
+            assertEquals(updateRoute.id, root.findFocus().nextFocusDownId)
+            assertTrue(updateRoute.requestFocus())
+            updateRoute.performClick()
+            val routePicker = ShadowDialog.getLatestDialog().window!!.decorView
+            val routeLabels = listOf("自动线路，当前已选", "GitHub 直连", "ghfast.top", "gh-proxy.org")
+            routeLabels.forEachIndexed { index, label ->
+                assertEquals(label, routePicker.findViewWithTag<View>("choice-$index").contentDescription)
+            }
+            routePicker.findViewWithTag<View>("choice-3").performClick()
+            ShadowLooper.idleMainLooper()
+            assertEquals("更新线路  ·  gh-proxy.org", updateRoute.text.toString())
+            assertTrue(updateRoute.hasFocus())
             root.findViewWithTag<View>("settings-category-1").performClick()
             val quality = texts(root).first { it.text.toString().startsWith("默认清晰度") }
             assertTrue(quality.hasFocus())
@@ -241,6 +254,13 @@ class TvUsabilityTest {
             listOf("检查更新", "播放", "外观与操作", "账户", "关于应用").forEach { title ->
                 assertTrue(rows.any { it.text == title })
             }
+            val softwareDecoding = rows.single { it.text.startsWith("强制软件解码") }.parent as View
+            assertTrue(softwareDecoding.isFocusable)
+            assertFalse(library.forceSoftwareDecoding)
+            softwareDecoding.performClick()
+            assertTrue(library.forceSoftwareDecoding)
+            softwareDecoding.performClick()
+            assertFalse(library.forceSoftwareDecoding)
             val danmaku = rows.single { it.text == "弹幕设置" }
             assertTrue(danmaku.requestFocus())
             danmaku.performClick()
