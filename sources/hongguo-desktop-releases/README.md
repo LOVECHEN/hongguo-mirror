@@ -1,12 +1,10 @@
-# 红果短剧全端版｜Windows 正式版、Mac 双架构与 Android TV
+# 红果桌面端（红果短剧电脑版）｜Windows、Mac 与 Android TV
 
-> **全端重大更新已上线（Windows 1.0.141 · Mac 1.0.141 Apple Silicon/Intel 双架构 · Android TV 0.5.12）**。Windows 与 Mac 同步升级零转码直连 CENC 播放、零白闪切剧、实时智能推荐与全新浅/深双主题；Mac 首次完整覆盖 M 系列与老款 Intel 芯片。[Windows 1.0.141 更新说明](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/tag/v1.0.141) · [Mac 1.0.141 双架构指南](MAC.md) · [Android TV 0.5.12](TV.md)。
+红果桌面端是「渠道有数」独立维护的免费第三方红果短剧客户端。Windows 10 / 11 x64 电脑无需安卓模拟器，即可搜索剧名、选集、收藏和从本机历史继续观看。相关品牌与内容归各自权利方所有。
 
-在 Windows 电脑上找剧、接着上次看。支持搜索、收藏、本机观看进度、选集、倍速和自动连播。
+**[下载 Windows 最新版 Setup](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/latest)** · [Windows 安装与排错](docs/WINDOWS-INSTALL.md) · [Mac 下载（M 系列及 Intel）](MAC.md) · [Android TV 下载（电视、盒子）](TV.md)
 
-**由渠道有数独立维护 · 免费使用 · Windows 正式版 · Mac 1.0.141 双架构 · Android TV 0.5.12**
-
-**[下载 Windows 最新版](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/latest)** · [安装和排错](docs/WINDOWS-INSTALL.md) · [全部版本](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases)
+Windows 用户打开最新版发行页，下载文件名以 `-setup.exe` 结尾的安装包。分享本项目时可核对发行仓库账号 `waligoraamodio288-rgb/hongguo-desktop-releases`，或直接分享[固定最新版入口](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/latest)。
 
 [渠道有数网站](https://shiyuemenghui.top/?utm_source=github&utm_medium=readme&utm_campaign=custom_domain) 在部分网络下暂时打不开。Windows 下载、安装和升级可使用上面的 GitHub 链接。
 
@@ -32,9 +30,15 @@ Windows 10 / 11 **x64（64 位）**。安装包大小以发行页附件为准。
 | --- | --- | --- |
 | Windows 电脑 | [Windows 固定最新版](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/latest) | Windows 10/11 x64 |
 | Android 电视、盒子、投影 | [0.5.12 测试版 · 选 ARM32 / ARM64](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/blob/main/TV.md) | Android 5.0+，按系统架构选包 |
-| Mac | [1.0.141 重大更新 · Apple Silicon / Intel 双架构](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/blob/main/MAC.md) | M 系列 + Intel x86_64，macOS 13.0+，按芯片选包 |
+| Mac | [1.0.143 修复版 · Apple Silicon / Intel 双架构](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/blob/main/MAC.md) | M 系列 + Intel x86_64，macOS 13.0+，按芯片选包 |
 
 分享 Windows 下载请使用[固定最新版入口](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/latest)；TV 和 Mac 请分享上方各自入口。无需关注、回帖或私信取包。
+
+## 下载前常见问题
+
+**电脑上怎么看红果短剧？** Windows 10 / 11 x64 可以直接运行桌面版，无需安卓模拟器。请从[固定最新版](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/latest)下载 Setup，装好后按[首次使用步骤](docs/WINDOWS-INSTALL.md#装好后怎么在电脑上开始看)搜索剧名和选集。
+
+**怎么辨认是渠道有数维护的红果桌面端？** 核对 GitHub 上的发行仓库账号 `waligoraamodio288-rgb/hongguo-desktop-releases`。本项目是第三方客户端。遇到转载写着旧版本，也可以用固定最新版链接检查当前版本与附件。
 
 ## Windows 版的其他功能
 
@@ -52,19 +56,19 @@ Windows 10 / 11 **x64（64 位）**。安装包大小以发行页附件为准。
 [观看旧版 42 秒操作演示：老板键与 3 倍速](https://www.bilibili.com/video/BV1SbH16iECg/)（录制版本 1.0.10，仅用于了解基本操作；以当前界面为准）。Windows 与 Android TV 的本机进度各自保存，TV 暂不跨设备同步。
 
 <!-- mac-beta-promotion-start -->
-## Mac 版重大更新（1.0.141）：Apple Silicon + Intel 全系双架构原生支持
+## Mac 版重大更新（1.0.143 · 已修回环代理与播放取流）：Apple Silicon + Intel 全系双架构原生支持
 
-**Mac 1.0.141 · Apple Silicon（M1–M4）与 Intel（x86_64）双架构 · macOS 13.0+ · 免费使用**
+**Mac 1.0.143 · Apple Silicon（M1–M4）与 Intel（x86_64）双架构 · macOS 13.0+ · 免费使用**
 
 基于 Windows 1.0.141 核心功能完整移植，并按 Apple 人机界面规范重做交互与视觉：透明融合标题栏、原生毛玻璃深/浅双色侧栏、原生顶部菜单栏与系统托盘、全套 `⌘` 快捷键（`⌘K` 命令面板、`⌘F` 检索、`⌘,` 设置、`⌘⇧D` 深浅主题、`⌘0` 缩放重置）、内置 `caffeinate` 播放防休眠，以及同步 1.0.141 全站设计系统、CENC 零转码直连与瞬切推荐。
 
-**[下载 Apple Silicon (M1–M4) DMG · 159.9 MiB](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/download/mac-v1.0.141/hongguo-1.0.141-macos-arm64.dmg)**　｜　**[下载 Intel (x86_64) DMG · 159.4 MiB](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/download/mac-v1.0.141/hongguo-1.0.141-macos-x64.dmg)**
+**[下载 Apple Silicon (M1–M4) DMG · 173.0 MiB](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/download/mac-v1.0.143/hongguo-1.0.143-macos-arm64.dmg)**　｜　**[下载 Intel (x86_64) DMG · 173.3 MiB](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/download/mac-v1.0.143/hongguo-1.0.143-macos-x64.dmg)**
 
-**[Mac 详细安装与快捷键指南](MAC.md)**　｜　**[mac-v1.0.141 更新说明与校验](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/tag/mac-v1.0.141)**　｜　**[反馈 Mac 问题](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/issues/new?template=macos.yml)**　｜　[参与测试与查看进度](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/issues/359)
+**[Mac 详细安装与快捷键指南](MAC.md)**　｜　**[mac-v1.0.143 更新说明与校验](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/tag/mac-v1.0.143)**　｜　**[反馈 Mac 问题](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/issues/new?template=macos.yml)**　｜　[参与测试与查看进度](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/issues/359)
 
-请按本机芯片选包（点击左上角  →「关于本机」查看芯片/处理器）：Apple Silicon 选 `arm64`，Intel Mac 选 `x64`。当前应用为 ad-hoc 签名、尚未 Apple 公证，首次打开若提示无法验证开发者，请在「系统设置 → 隐私与安全性」中允许打开，或拖入「应用程序」后在终端执行 `xattr -cr "/Applications/红果桌面版.app"`；请核对发布页 `SHA256SUMS-mac-v1.0.141.txt`，不要关闭系统完整性保护（SIP）。
+请按本机芯片选包（点击左上角  →「关于本机」查看芯片/处理器）：Apple Silicon 选 `arm64`，Intel Mac 选 `x64`。当前应用为 ad-hoc 签名、尚未 Apple 公证，首次打开若提示无法验证开发者，请在「系统设置 → 隐私与安全性」中允许打开，或拖入「应用程序」后在终端执行 `xattr -cr "/Applications/红果桌面版.app"`；请核对发布页 `SHA256SUMS-mac-v1.0.143.txt`，不要关闭系统完整性保护（SIP）。
 
-本次验证范围：已在 Apple Silicon（macOS 26.7.2）与 Intel x86_64（macOS 15.7.9）双架构云端实机完成打包，分别通过 69 项前端单测、415 项 Rust 单测、内置后端冷启动握手、封面解码与浅/深色窗口实拍验证（Intel 额外通过 Unicorn 2.1.4 签名器原生仿真自检）。物理扬声器真实出声、长时间连续播放与覆盖升级仍待真机用户补充反馈。Mac 版暂不提供应用内自动更新，不替代 Windows 正式版。**下方演示和安装步骤为 Windows 版，不能视作 Mac 实测。**
+本次验证范围：1.0.143 已在 Apple Silicon（macOS ARM64）与 Intel x86_64 双架构云端实机完成打包，分别通过 69 项前端单测、415 项 Rust 单测、内置后端冷启动握手、29/29 账号协议与空白配置状态校验、毒代理下本机回环签名直通、Unicorn 2.1.4 与本地校验种子下空白配置实测《穿越八零》第 6 集取流（`code=0`，5 条可播轨道）以及浅/深色窗口实拍验证。物理扬声器真实出声、长时间连续播放与覆盖升级仍待真机用户补充反馈。Mac 版暂不提供应用内自动更新，不替代 Windows 正式版。**下方演示和安装步骤为 Windows 版，不能视作 Mac 实测。**
 <!-- mac-beta-promotion-end -->
 
 ## 电视、盒子、投影与平板
@@ -125,7 +129,7 @@ Windows 用户可先在设置里核对版本，再到[固定最新版入口](htt
 
 ## 版本变化与已知反馈
 
-**1.0.141 全端更新**。Windows 升级零转码直连 CENC 播放、零白闪切剧、实时推荐算法升级与全新自动更新弹窗；macOS 1.0.141 同步全功能并首次兼容 Apple Silicon + Intel 双架构。[Windows 1.0.141 说明](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/tag/v1.0.141) · [Mac 1.0.141 说明](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/tag/mac-v1.0.141) · [历史 1.0.139](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/tag/v1.0.139)。
+**1.0.141 全端更新**。Windows 升级零转码直连 CENC 播放、零白闪切剧、实时推荐算法升级与全新自动更新弹窗；macOS 1.0.141 同步全功能并首次兼容 Apple Silicon + Intel 双架构。[Windows 1.0.141 说明](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/tag/v1.0.141) · [Mac 1.0.143 说明](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/tag/mac-v1.0.143) · [历史 1.0.139](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/tag/v1.0.139)。
 
 **1.0.51（历史）：** 修复下载断点记录不一致与手机进度同步回执容量问题，改善评论图片查看和全屏按钮遮挡。
 
@@ -189,13 +193,7 @@ v1.0.3 新增热播榜按需加载、播放服务未就绪时的明确提示，�
 
 当前版本尚未配置 Windows 发布者代码签名，系统可能显示未知发布者或 SmartScreen 提示。请核对下载来源与文件，不要关闭系统防护；某些系统策略可能限制安装。
 
-Windows 1.0.141 安装器大小：`118936604` 字节。SHA-256：
-
-```text
-
-fdd6df304f41e01ea1a30215c74701ff2dfb2bbef391a1d13522d9aed6738220
-
-```
+Windows 安装包大小与 SHA-256 请在[固定最新版发行页](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases/releases/latest)按同版本附件核对。
 
 摘要用于核对文件一致性，不能代替发布者身份认证。应用内更新使用固定公钥验证更新包签名；更新签名与 Windows 发布者代码签名不同。软件启动后可以检查版本，也可在设置中手动检查，仅在用户点击更新后下载安装。
 
