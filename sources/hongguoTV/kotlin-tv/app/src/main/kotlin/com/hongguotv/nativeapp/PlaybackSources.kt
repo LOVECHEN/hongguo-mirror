@@ -35,7 +35,7 @@ internal fun playbackFailureSummary(problem: Throwable): String {
     if (causes.any { it is com.hongguotv.core.PlaybackDeviceRegistrationException })
         return "播放设备注册失败"
     if (causes.any { it is NoPlayableQualityException })
-        return "本集低档为 VVC（bytevc2）编码，电视无法解码，可尝试其他集数"
+        return "本集没有符合当前清晰度和解码能力的片源，可尝试其他集数或解码方式"
     if (causes.any { it is EmptyPlaybackResponseException }) return "播放信息接口返回空响应"
     causes.filterIsInstance<ContentHttpException>().firstOrNull()?.let {
         return "播放信息请求失败（HTTP ${it.statusCode}）"
@@ -107,6 +107,9 @@ internal fun diagnosticDetail(problem: Throwable): String? =
                 cause is java.io.InterruptedIOException &&
                     cause.message in setOf("timeout", "deadline reached") -> "timeout=deadline"
                 cause is com.hongguotv.core.PlaybackDiagnosticException -> cause.detail
+                cause is NoPlayableQualityException -> cause.track?.let {
+                    "coded=${it.width}x${it.height} codec=${it.codecs ?: it.fourcc}"
+                }
                 cause is EmptyPlaybackResponseException -> cause.detail?.takeIf { it.isNotBlank() }
                 cause is ContentHttpException -> "http=${cause.statusCode}"
                 cause is androidx.media3.common.PlaybackException ->
@@ -130,23 +133,24 @@ internal class OpenedStream(
 
 /** Shares previously opened renditions between the feed and full-screen player in one Activity. */
 internal class PlaybackSourceCache(private val clock: () -> Long = SystemClock::elapsedRealtime) {
-    private data class Entry(val rendition: Rendition, val openedAt: Long, val requestedMaxQuality: Int)
+    private data class Entry(val rendition: Rendition, val openedAt: Long, val requestedMaxQuality: Int,
+        val allowQualityFallback: Boolean)
     private val entries = linkedMapOf<String, Entry>()
 
     @Synchronized
-    fun find(id: String, maxQuality: Int): Rendition? {
+    fun find(id: String, maxQuality: Int, allowQualityFallback: Boolean = true): Rendition? {
         prune(clock())
         val entry = entries[id] ?: return null
-        // An episode can offer only a compatible tier above the requested limit.
-        return entry.rendition.takeIf { it.quality <= maxQuality || entry.requestedMaxQuality == maxQuality }
+        return entry.rendition.takeIf { it.quality <= maxQuality &&
+            (allowQualityFallback || !entry.allowQualityFallback && entry.requestedMaxQuality == maxQuality) }
     }
 
     @Synchronized
-    fun remember(id: String, rendition: Rendition, maxQuality: Int) {
+    fun remember(id: String, rendition: Rendition, maxQuality: Int, allowQualityFallback: Boolean = true) {
         val now = clock()
         prune(now)
         entries.remove(id)
-        entries[id] = Entry(rendition, now, maxQuality)
+        entries[id] = Entry(rendition, now, maxQuality, allowQualityFallback)
         while (entries.size > 6) entries.remove(entries.keys.first())
     }
 
@@ -154,6 +158,8 @@ internal class PlaybackSourceCache(private val clock: () -> Long = SystemClock::
     fun forget(id: String, rendition: Rendition? = null) {
         if (rendition == null || entries[id]?.rendition === rendition) entries.remove(id)
     }
+
+    @Synchronized fun clear() { entries.clear() }
 
     private fun prune(now: Long) {
         entries.entries.removeAll { now - it.value.openedAt !in 0 until TimeUnit.MINUTES.toMillis(5) }
@@ -207,11 +213,11 @@ private class RecentSourceValidation(
 }
 
 /**
- * 阶梯非空但没有任何一档能被本机解码（bytevc2 锁定集的确定性结果）：重试只会得到同一结果，
+ * 阶梯非空但没有任何一档满足清晰度和解码约束：重试只会得到同一结果，
  * 上层不应再进入自动恢复预算；手动重试保留（服务端转码推进后该集供给可能翻转为 bytevc1）。
  */
-internal class NoPlayableQualityException :
-    java.io.IOException("本集低档为 VVC（bytevc2）编码，电视无法解码，可尝试其他集数")
+internal class NoPlayableQualityException(val track: VideoTracks.Track? = null) :
+    java.io.IOException("本集没有符合当前清晰度和解码能力的片源")
 
 /**
  * 试播后移换集：候选集固定为前三集（绝对上限，试播兜底不无限后移），从 start 集起依次尝试，
@@ -247,23 +253,33 @@ internal fun openStream(
     initialBytes: Int = 256 * 1024,
     metadataAhead: List<String> = emptyList(),
     speculative: Boolean = false,
+    allowQualityFallback: Boolean = true,
     supportsTrack: (VideoTracks.Track?) -> Boolean,
 ): OpenedStream? {
     fun prepare(ladder: StreamLadder): OpenedStream? {
-        for (rendition in ladder.playbackOrder(maxQuality, supportsRendition)) {
+        var rejectedTrack: VideoTracks.Track? = null
+        // Choose the source tier BEFORE device filtering. A rejected high tier must not silently
+        // become a lower tier when the user disabled automatic quality changes.
+        val highest = ladder.renditions.filter { it.quality <= maxQuality }.maxOfOrNull { it.quality }
+        for (rendition in ladder.playbackOrder(maxQuality) {
+            (allowQualityFallback || it.quality == highest) && supportsRendition(it)
+        }) {
             val video = RemoteVideo(http, rendition.toStreamInfo())
             try {
                 video.prepare(initialBytes)
                 RequestScope.ensureActive()
                 val track = video.trackInfo()
-                if (supportsTrack(track)) {
+                rejectedTrack = track ?: rejectedTrack
+                val withinQuality = track == null || minOf(track.width, track.height) <= maxQuality
+                if (withinQuality && supportsTrack(track)) {
                     val openedRendition = if (video.info.url == rendition.url) rendition
                     else rendition.copy(url = video.info.url, backupUrl = video.info.backupUrl)
                     return OpenedStream(video, openedRendition, ladder.renditions, track)
                 }
                 Log.i(
                     "HongguoTV",
-                    "Skipped ${rendition.quality}P ${rendition.codec}: coded ${track?.width}x${track?.height} beyond decoder capability",
+                    "Skipped ${rendition.quality}P ${rendition.codec}: coded=${track?.width}x${track?.height} " +
+                        "codecs=${track?.codecs}; incompatible with decoder or quality limit ($maxQuality P)",
                 )
                 video.close()
             } catch (error: Exception) {
@@ -271,16 +287,18 @@ internal fun openStream(
                 throw error
             }
         }
-        if (ladder.renditions.isNotEmpty()) throw NoPlayableQualityException()
+        if (ladder.renditions.isNotEmpty()) throw NoPlayableQualityException(rejectedTrack)
         return null
     }
 
     var validation: RecentSourceValidation? = null
     val prepareDeadline = RequestScope.deadlineAtMost(Long.MAX_VALUE)
     val ladder = try {
-        repository.streamLadderWithCompatibility(id, metadataAhead, speculative) {
-            val cached = recentSources.find(id, maxQuality)
-            if (cached != null) {
+        repository.streamLadderWithCompatibility(id, metadataAhead, speculative,
+            acceptable = { it.quality <= maxQuality && supportsRendition(it) }) {
+            val cached = recentSources.find(id, maxQuality, allowQualityFallback)
+            // Session recovery can invoke this callback twice; share and close one validation job.
+            if (cached != null && validation == null) {
                 val deadline = minOf(prepareDeadline, System.nanoTime() + TimeUnit.SECONDS.toNanos(2))
                 try {
                     validation = RecentSourceValidation(id, cached, deadline, http.dispatcher.executorService) {
@@ -299,14 +317,14 @@ internal fun openStream(
             problem.suppressed.any { it is EmptyPlaybackResponseException }
         if (speculative || (!modelsEmpty && !backupTimedOut)) throw problem
         val pending = validation ?: throw problem
-        if (recentSources.find(id, maxQuality) !== pending.rendition) throw problem
+        if (recentSources.find(id, maxQuality, allowQualityFallback) !== pending.rendition) throw problem
         val recovered = pending.take()
         if (recovered == null) {
             recentSources.forget(id, pending.rendition)
             problem.addSuppressed(PlaybackDiagnosticException("recent-source=unavailable"))
             throw problem
         }
-        if (recentSources.find(id, maxQuality) !== pending.rendition) {
+        if (recentSources.find(id, maxQuality, allowQualityFallback) !== pending.rendition) {
             recovered.close()
             throw problem
         }
@@ -316,7 +334,7 @@ internal fun openStream(
         validation?.close()
     }
     return prepare(ladder)?.also { opened ->
-        opened.rendition?.let { recentSources.remember(id, it, maxQuality) }
+        opened.rendition?.let { recentSources.remember(id, it, maxQuality, allowQualityFallback) }
     }
 }
 
